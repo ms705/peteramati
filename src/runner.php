@@ -405,7 +405,7 @@ class RunnerState {
             $command .= " -i" . escapeshellarg($this->inputfifo);
         $command .= " " . escapeshellarg($homedir)
             . " " . escapeshellarg($this->username)
-            . " TERM=xterm-256color"
+            . " TERM=xterm-16color"
             . " " . escapeshellarg($this->expand($this->runner->command));
         $this->lockfile = null; /* now owned by command */
         return $this->run_and_log($command);
