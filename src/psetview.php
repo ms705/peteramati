@@ -805,7 +805,35 @@ class PsetView {
 
         if ($deadline && $timestamp) {
             if ($deadline < $timestamp) {
-                $autohours = (int) ceil(($timestamp - $deadline) / 3600);
+		// CS 131 late hours formula
+		$submitted = getdate($timestamp);
+		$dead = getdate($deadline);
+		if ($dead["mday"] == $submitted["mday"]) {
+		    // time between deadline and start of day at 7am
+		    $diff = ($dead["hours"] - 7) * 3600 + ($dead["minutes"]) * 60 + $dead["seconds"];
+		    if ($diff < 0) {
+			    // deadline before 7am; discount time in [deadline, 7am)
+			    $autohours = (int) ceil(($timestamp - ($deadline - $diff)) / 3600);
+		    } else {
+			    // deadline after 7am, count full time for the day
+			    $autohours = (int) ceil(($timestamp - $deadline) / 3600);
+		    }
+		} else {
+		    // submitted on a later day
+		    // 1. count the rest of the deadline day
+		    $to_midnight = (24 - $submitted["hours"]) * 3600 + (60 - $submitted["minutes"]) * 60 + (60 - $submitted["seconds"]);
+		    // remainder of time between deadline and submission, minus time on deadline day
+		    $remainder = $timestamp - $deadline - $to_midnight;
+		    assert($remainder >= 0);
+		    // 2. time from midnight of deadline day until submission
+		    $sub_days = ceil((double)$remainder / 86400.0);
+		    // subtract 7 hours per extra day, but don't count if student only used < 7h
+		    $remainder = $remainder - $sub_days * 7 * 3600;
+		    $autohours = (int) ceil(($to_midnight + max(0, $remainder)) / 3600);
+		}
+
+		// original
+                //$autohours = (int) ceil(($timestamp - $deadline) / 3600);
             } else {
                 $autohours = 0;
             }
