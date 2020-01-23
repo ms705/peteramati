@@ -1303,7 +1303,7 @@ function render_pset_row(Pset $pset, $sset, PsetView $info, $anonymous) {
 }
 
 function show_pset_table($sset) {
-    global $Now, $Profile, $Qreq;
+    global $Me, $Now, $Profile, $Qreq;
 
     $pset = $sset->pset;
     echo '<div id="', $pset->urlkey, '">';
@@ -1397,7 +1397,7 @@ function show_pset_table($sset) {
         "key" => $pset->urlkey,
         "title" => $pset->title
     ];
-    if ($anonymous) {
+    if ($Me->privChair) {
         $jd["can_override_anonymous"] = true;
     }
     $i = $nintotal = $last_in_total = 0;
