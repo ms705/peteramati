@@ -40,7 +40,7 @@ class GradeFormula implements JsonSerializable {
         } else if (preg_match('{\A(?:pi|π|m_pi)\b(.*)\z}si', $t, $m)) {
             $t = $m[2];
             $e = new GradeFormula("n", (float) M_PI);
-        } else if (preg_match('{\A(log10|log|ln|lg|exp)\b(.*)\z}s', $t, $m)) {
+        } else if (preg_match('{\A(log10|log|ln|lg|exp|floor)\b(.*)\z}s', $t, $m)) {
             $t = $m[2];
             $e = self::parse($conf, $t, 12);
             if ($e !== null) {
@@ -170,6 +170,8 @@ class GradeFormula implements JsonSerializable {
             return log($vs[0]) / log(2);
         case "exp":
             return exp($vs[0]);
+        case "floor":
+	    return floor($vs[0]);
         }
     }
 
