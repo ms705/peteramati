@@ -94,6 +94,10 @@ class Unary_GradeFormula extends GradeFormula {
             return $v0 > 0 ? log($v0) / log(2) : null;
         case "exp":
             return exp($v0);
+        case "ceil":
+            return ceil($v0);
+        case "floor":
+            return floor($v0);
         }
     }
 }
