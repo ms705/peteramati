@@ -4,17 +4,25 @@
 // See LICENSE for open-source distribution terms
 
 class GitHubResponse implements JsonSerializable {
+    /** @var string */
     public $url;
+    /** @var int */
     public $status = 509;
+    /** @var string */
     public $status_text;
+    /** @var array<string,string> */
     public $headers = [];
+    /** @var ?string */
     public $content;
-    public $j;
+    /** @var ?object */
+    public $response;
+    /** @var ?object */
+    public $rdata;
     function __construct($url) {
         $this->url = $url;
     }
     function jsonSerialize() {
-        return $this->j ? : ["status" => $this->status, "content" => $this->content];
+        return $this->response ?? ["status" => $this->status, "content" => $this->content];
     }
     function run_post(Conf $conf, $content_type, $content, $header = "") {
         if (is_array($content) || is_object($content)) {
@@ -53,8 +61,14 @@ class GitHubResponse implements JsonSerializable {
             }
             $this->content = stream_get_contents($stream);
             if ($this->content !== false
-                && (empty($this->headers) || str_starts_with($this->headers["content-type"], "application/json"))) {
-                $this->j = json_decode($this->content);
+                && (empty($this->headers) || str_starts_with($this->headers["content-type"], "application/json"))
+                && ($j = json_decode($this->content))
+                && is_object($j)) {
+                $this->response = $j;
+                $rd = $j->data ?? null;
+                if ($this->status === 200 && is_object($rd)) {
+                    $this->rdata = $rd;
+                }
             }
             fclose($stream);
         }
@@ -62,32 +76,37 @@ class GitHubResponse implements JsonSerializable {
 }
 
 class GitHub_RepositorySite extends RepositorySite {
+    /** @var Conf */
     public $conf;
     public $base;
-    public $siteclass = "github";
     function __construct($url, $base, Conf $conf) {
         $this->url = $url;
         $this->base = $base;
         $this->conf = $conf;
+        $this->siteclass = "github";
     }
 
     const MAINURL = "https://github.com/";
     static function make_url($url, Conf $conf) {
-        $url = preg_replace('_\s*/\s*_', '/', $url);
-        if (preg_match('_\A(?:github(?:\.com)?[:/])?/*([^/:@]+/[^/:@]+?)(?:\.git|)\z_i', $url, $m))
+        $url = preg_replace('/\s*\/\s*/', '/', $url);
+        if (preg_match('/\A(?:github(?:\.com|)[:\/])?\/*([^\/:@]+\/[^\/:@]+?)(?:\.git|)\z/i', $url, $m)) {
             return new GitHub_RepositorySite("git@github.com:" . $m[1], $m[1], $conf);
-        if (preg_match('_\A(?:https?://|git://|ssh://(?:git@)?|git@|)github.com(?::/*|/+)([^/]+?/[^/]+?)(?:\.git|)\z_i', $url, $m))
+        } else if (preg_match('/\A(?:https?:\/\/|git:\/\/|ssh:\/\/(?:git@|)|git@|)github\.com(?::\/*|\/+)([^\/]+?\/[^\/]+?)(?:\.git|)\z/i', $url, $m)) {
             return new GitHub_RepositorySite("git@github.com:" . $m[1], $m[1], $conf);
-        return null;
+        } else {
+            return null;
+        }
     }
     static function sniff_url($url) {
-        if (preg_match('_\A(?:https?://|git://|ssh://(?:git@)?|git@|)github.com(?::/*|/+)(.*?)(?:\.git|)\z_i', $url, $m))
+        if (preg_match('/\A(?:https?:\/\/|git:\/\/|ssh:\/\/(?:git@)?|git@|)github.com(?::\/*|\/+)(.*?)(?:\.git|)\z/i', $url, $m)) {
             return 2;
-        else if (preg_match('_\A(?:github(?:\.com)?)(?::/*|/+)([^/:@]+/[^/:@]+?)(?:\.git|)\z_i', $url, $m))
+        } else if (preg_match('/\A(?:github(?:\.com)?)(?::\/*|\/+)([^\/:@]+\/[^\/:@]+?)(?:\.git|)\z/i', $url, $m)) {
             return 2;
-        else if (preg_match('_\A/*([^/:@]+/[^/:@]+?)(?:\.git|)\z_i', $url, $m))
+        } else if (preg_match('/\A\/*([^\/:@]+\/[^\/:@]+?)(?:\.git|)\z/i', $url, $m)) {
             return 1;
-        return 0;
+        } else {
+            return 0;
+        }
     }
     static function home_link($html) {
         return Ht::link($html, self::MAINURL);
@@ -109,7 +128,7 @@ class GitHub_RepositorySite extends RepositorySite {
         global $Me;
         if (!$first && !$user->github_username)
             return;
-        echo Ht::form(hoturl_post("index", array("set_username" => 1, "u" => $Me->user_linkpart($user), "reposite" => "github"))),
+        echo Ht::form($user->conf->hoturl_post("index", array("set_username" => 1, "u" => $Me->user_linkpart($user), "reposite" => "github"))),
             '<div class="f-contain">';
         $notes = array();
         if (!$user->github_username)
@@ -119,23 +138,33 @@ class GitHub_RepositorySite extends RepositorySite {
                                 . "  " . Ht::submit("Save"), $notes);
         echo "</div></form>";
     }
+    /** @param string $username
+     * @return bool */
     static function save_username(Contact $user, $username) {
         global $Me;
-        // does it contain odd characters?
         $username = trim((string) $username);
-        if ($username == "") {
-            if ($Me->privChair)
+
+        // empty?
+        if ($username === "") {
+            if ($Me->privChair) {
                 return $user->change_username("github", null);
-            return Conf::msg_error("Empty username.");
-        }
-        if (preg_match('_[@,;:~/\[\](){}\\<>&#=\\000-\\027]_', $username)) {
-            return Conf::msg_error("The username “" . htmlspecialchars($username) . "” contains funny characters. Remove them.");
+            } else {
+                Conf::msg_error("Empty username.");
+                return false;
+            }
         }
 
-        // is it in use?
+        // weird?
+        if (preg_match('_[@,;:~/\[\](){}\\<>&#=\\000-\\027]_', $username)) {
+            Conf::msg_error("The username “" . htmlspecialchars($username) . "” contains funny characters. Remove them.");
+            return false;
+        }
+
+        // in use?
         $x = $user->conf->fetch_value("select contactId from ContactInfo where github_username=?", $username);
         if ($x && $x != $user->contactId) {
-            return Conf::msg_error("That username is already in use.");
+            Conf::msg_error("That username is already in use.");
+            return false;
         }
 
         // is it valid? XXX GitHub API
@@ -152,26 +181,28 @@ class GitHub_RepositorySite extends RepositorySite {
         }
         $gq .= " } }";
         $gql = self::graphql($user->conf, $gq);
-        if ($gql->status !== 200
-            || !$gql->j
-            || !isset($gql->j->data)) {
+        if (!$gql->rdata) {
             error_log(json_encode($gql));
-            return Conf::msg_error("Error contacting the GitHub API. Maybe try again?");
-        } else if (!isset($gql->j->data->user)) {
-            return Conf::msg_error("That user doesn’t exist. Check your spelling and try again.");
-        } else if (!isset($gql->j->data->user->organization)) {
+            Conf::msg_error("Error contacting the GitHub API. Maybe try again?");
+            return false;
+        } else if (!isset($gql->rdata->user)) {
+            Conf::msg_error("That user doesn’t exist. Check your spelling and try again.");
+            return false;
+        } else if (!isset($gql->rdata->user->organization)) {
             if ($user->conf->opt("githubRequireOrganizationMembership")) {
-                return Conf::msg_error("That user isn’t a member of the " . Ht::link(htmlspecialchars($org) . " organization", self::MAINURL . urlencode($org)) . ", which manages the class. Follow the link to register with the class, or contact course staff.");
+                Conf::msg_error("That user isn’t a member of the " . Ht::link(htmlspecialchars($org) . " organization", self::MAINURL . urlencode($org)) . ", which manages the class. Follow the link to register with the class, or contact course staff.");
+                return false;
             }
         } else if ($staff_team
                    && $user->is_student()
-                   && isset($gql->j->data->user->organization->team)
-                   && isset($gql->j->data->user->organization->team->members)
-                   && array_filter($gql->j->data->user->organization->team->members->nodes,
+                   && isset($gql->rdata->user->organization->team)
+                   && isset($gql->rdata->user->organization->team->members)
+                   && array_filter($gql->rdata->user->organization->team->members->nodes,
                                 function ($node) use ($username) {
                                     return strcasecmp($username, $node->login) === 0;
                                 })) {
-            return Conf::msg_error("That user is a member of the course staff.");
+            Conf::msg_error("That user is a member of the course staff.");
+            return false;
         }
 
         return $user->change_username("github", $username);
@@ -221,15 +252,13 @@ class GitHub_RepositorySite extends RepositorySite {
         $gql = self::graphql($this->conf,
             "{ repository(owner:" . json_encode($owner_name[0])
             . ", name:" . json_encode($owner_name[1]) . ") { isPrivate } }");
-        if ($gql->status !== 200
-            || !$gql->j
-            || !isset($gql->j->data)) {
+        if (!$gql->rdata) {
             error_log(json_encode($gql));
             return -1;
-        } else if ($gql->j->data->repository == null) {
+        } else if ($gql->rdata->repository == null) {
             $ms && $ms->error_at("open", $this->expand_message("repo_nonexistent", $ms->user));
             return 1;
-        } else if (!$gql->j->data->repository->isPrivate) {
+        } else if (!$gql->rdata->repository->isPrivate) {
             $ms && $ms->error_at("open", $this->expand_message("repo_toopublic", $ms->user));
             return 1;
         } else {
@@ -244,10 +273,10 @@ class GitHub_RepositorySite extends RepositorySite {
         $answer = join("\n", $output);
         if ($status >= 124) { // timeout
             $status = -1;
-        } else if (!preg_match('{\A[0-9a-f]{40,}\s+}', $answer)) {
+        } else if (!preg_match('/\A[0-9a-f]{40,}\s+/', $answer)) {
             $ms && $ms->error_at("working", $this->expand_message("repo_unreadable", $ms->user));
             $status = 0;
-        } else if (!preg_match('{^[0-9a-f]{40,}\s+refs/heads/master}m', $answer)) {
+        } else if (!preg_match('/^[0-9a-f]{40,}\s+refs\/heads\/(?:' . $this->conf->default_main_branch . '|master|main)/m', $answer)) {
             $ms && $ms->error_at("working", $this->expand_message("repo_nomaster", $ms->user));
             $status = 0;
         } else {
@@ -256,7 +285,6 @@ class GitHub_RepositorySite extends RepositorySite {
         return $status;
     }
     function gitfetch($repoid, $cacheid, $foreground) {
-        global $ConfSitePATH;
         if (!($id = $this->conf->opt("githubOAuthClientId"))
             || !($token = $this->conf->opt("githubOAuthToken"))
             || !ctype_alnum($token)) {
@@ -264,7 +292,8 @@ class GitHub_RepositorySite extends RepositorySite {
         }
         putenv("GIT_USERNAME=$id");
         putenv("GIT_PASSWORD=$token");
-        $command = escapeshellarg("$ConfSitePATH/src/gitfetch")
+        $command = escapeshellarg(SiteLoader::$root . "/src/gitfetch")
+            . " -m " . escapeshellarg($this->conf->default_main_branch)
             . " $repoid $cacheid " . escapeshellarg($this->https_url())
             . " 1>&2" . ($foreground ? "" : " &");
         shell_exec($command);
@@ -285,14 +314,12 @@ class GitHub_RepositorySite extends RepositorySite {
             . " collaborators(query:" . json_encode($user->github_username)
             . ") { nodes { login } } } }";
         $gql = self::graphql($this->conf, $gq);
-        if ($gql->status !== 200
-            || !$gql->j
-            || !isset($gql->j->data)) {
+        if (!$gql->rdata) {
             error_log(json_encode($gql));
             return -1;
-        } else if ($gql->j->data->repository == null) { // no such repository
+        } else if ($gql->rdata->repository == null) { // no such repository
             return -1;
-        } else if (array_filter($gql->j->data->repository->collaborators->nodes,
+        } else if (array_filter($gql->rdata->repository->collaborators->nodes,
                         function ($node) use ($user) {
                             return strcasecmp($node->login, $user->github_username) === 0;
                         })) {

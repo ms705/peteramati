@@ -7,14 +7,16 @@ require_once("src/initweb.php");
 if ($Me->is_empty() || !$Me->isPC)
     $Me->escape();
 
-$Conf->header("Overview", "home");
+$Conf->header("Overview", "home", ["body_class" => "want-grgraph-hash"]);
 
 echo '<form class="pa-grade-overview">';
 echo '<div class="pa-grade-overview-users"><div class="pa-grade-overview-users-inner">',
-    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="93.5-">A</label> ',
-    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="90-93.5" data-pa-highlight-type="h01">A-</label> ',
-    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="86.5-90" data-pa-highlight-type="h10">B+</label> ',
-    '<table class="pap" id="pa-overview-table"></table>',
+    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="93.5-" data-pa-highlight-type="h00"><strong class="hl-h00">A</strong></label> ',
+    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="90-93.5" data-pa-highlight-type="h01"><strong class="hl-h01">A-</strong></label> ',
+    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="86.5-90" data-pa-highlight-type="h02"><strong class="hl-h02">B+</strong></label> ',
+    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="83.5-86.5" data-pa-highlight-type="h03"><strong class="hl-h03">B</strong></label> ',
+    '<label><input type="checkbox" class="uich js-grgraph-highlight-course" data-pa-highlight-range="80-83.5" data-pa-highlight-type="h04"><strong class="hl-h04">B-</strong></label> ',
+    '<table class="pap gtable" id="pa-overview-table"></table>',
     '</div></div>';
 echo '<div class="pa-gradegrid">';
 $any_anonymous = false;
@@ -35,23 +37,23 @@ foreach ($Conf->psets() as $pset) {
     }
 }
 echo '</div></form>';
-Ht::stash_script("\$(\".pa-grgraph\").each(pa_gradecdf);\$(window).on(\"resize\",function(){\$(\".pa-grgraph\").each(pa_gradecdf)})");
+Ht::stash_script("\$(\".pa-grgraph\").each(\$pa.grgraph);\$(window).on(\"resize\",function(){\$(\".pa-grgraph\").each(\$pa.grgraph)})");
 
-$Sset = new StudentSet($Me);
+$Sset = new StudentSet($Me, StudentSet::ALL);
 $sj = [];
 $college = $Qreq->college || $Qreq->all || !$Qreq->extension;
 $extension = $Qreq->extension || $Qreq->all;
 foreach ($Sset->users() as $u) {
     if ($u->extension ? $extension : $college)
-        $sj[] = StudentSet::json_basics($u, false);
+        $sj[] = StudentSet::json_basics($u, $any_anonymous);
 }
 $jd = ["id" => "overview",
        "checkbox" => true,
        "anonymous" => $any_anonymous,
        "can_override_anonymous" => $any_anonymous,
-       "col" => [["type" => "checkbox", "className" => "uix uich js-range-click js-grgraph-highlight"], "rownumber", "name2"]];
+       "col" => [["type" => "checkbox", "className" => "uic uich js-range-click js-grgraph-highlight"], "rownumber", "name2"]];
 echo Ht::unstash(),
-    '<script>$("#pa-overview-table").each(function(){pa_render_pset_table.call(this,',
+    '<script>$("#pa-overview-table").each(function(){$pa.render_pset_table.call(this,',
     json_encode_browser($jd), ',', json_encode_browser($sj), ')})</script>';
 echo '<hr class="c">';
 $Conf->footer();

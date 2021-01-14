@@ -5,20 +5,29 @@
 require_once("src/initweb.php");
 
 // parse request
-if ($Qreq->base !== null)
-    $Conf->set_siteurl($Qreq->base);
-if ($Qreq->path_front() && substr($Qreq->path_front(), 0, 1) === "~")
-    $Qreq->u = substr(urldecode($Qreq->shift_path()), 1);
-if (($x = $Qreq->shift_path()))
-    $Qreq->fn = urldecode($x);
-if (($x = $Qreq->shift_path())) {
-    if (!$Qreq->pset)
-        $Qreq->pset = urldecode($x);
-    if (($x = $Qreq->shift_path())) {
-        if (!$Qreq->commit)
-            $Qreq->commit = urldecode($x);
+function prepare_api_request(Conf $conf, Qrequest $qreq) {
+    if ($qreq->base !== null) {
+        $conf->set_siteurl($qreq->base);
+    }
+    if ($qreq->path_component(0)
+        && substr($qreq->path_component(0), 0, 1) === "~") {
+        $qreq->u = substr(urldecode($qreq->shift_path_components(1)), 2);
+    }
+    if (($x = $qreq->shift_path_components(1))) {
+        $qreq->fn = substr(urldecode($x), 1);
+    }
+    if (($x = $qreq->shift_path_components(1))) {
+        if (!$qreq->pset) {
+            $qreq->pset = substr(urldecode($x), 1);
+        }
+        if (($x = $qreq->shift_path_components(1))) {
+            if (!$qreq->commit) {
+                $qreq->commit = substr(urldecode($x), 1);
+            }
+        }
     }
 }
+prepare_api_request($Conf, $Qreq);
 
 // check user
 $api = new APIData($Me);
@@ -31,10 +40,11 @@ if ($Qreq->pset && !($api->pset = $Conf->pset_by_key($Qreq->pset))) {
     json_exit(["ok" => false, "error" => "No such pset."]);
 }
 if ($api->pset && $api->pset->disabled) {
-    if ($Me->isPC)
+    if ($Me->isPC) {
         json_exit(["ok" => false, "error" => "Pset disabled."]);
-    else
+    } else {
         json_exit(["ok" => false, "error" => "No such pset."]);
+    }
 } else if ($api->pset && !$api->pset->visible && !$Me->isPC) {
     json_exit(["ok" => false, "error" => "No such pset."]);
 }
@@ -42,7 +52,7 @@ if ($api->pset && $api->pset->disabled) {
 // check commit
 if ($api->pset && !$api->pset->gitless && !$Me->is_empty()) {
     $api->repo = $api->user->repo($api->pset);
-    $api->branch = $api->user->branch_name($api->pset);
+    $api->branch = $api->user->branch($api->pset);
 }
 if ($api->repo && $Qreq->commit) {
     $api->hash = $Qreq->commit;

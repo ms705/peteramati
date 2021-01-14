@@ -4,76 +4,155 @@
 // See LICENSE for open-source distribution terms
 
 class StudentSet implements Iterator, Countable {
+    /** @var Conf
+     * @readonly */
     public $conf;
+    /** @var Contact
+     * @readonly */
     public $viewer;
+    /** @var ?Pset */
     public $pset;
+    /** @var int */
     private $_psetid;
+    /** @var bool */
     private $_anonymous;
+    /** @var array<int,Contact> */
     private $_u = [];
+    /** @var list<Contact> */
     private $_ua;
+    /** @var int */
     private $_upos;
+    /** @var array<int,Repository> */
     private $_repo = [];
-    private $_rg = [];
-    private $_cn = [];
-    private $_cg = [];
+    /** @var array<int,RepositoryPsetInfo> */
+    private $_rpi = [];
+    /** @var array<string,CommitPsetInfo> */
+    private $_cpi = [];
+    /** @var array<int,UserPsetInfo> */
+    private $_upi = [];
+    /** @var array<int,int> */
+    private $_flags = [];
+    /** @var array<string,list<int>> */
     private $_rb_uids = [];
-    private $_pset_loaded = [];
+    /** @var ?array<int,CommitPsetInfo> */
+    private $_cpi_by_repo;
+    /** @var ?array<string,PsetView> */
+    private $_infos;
+
+    const NO_UPI = 1;
 
     const COLLEGE = 1;
     const EXTENSION = 2;
     const ENROLLED = 4;
     const DROPPED = 8;
+    const TF = 16;
+    const ALL = 15;
+    const ALL_ENROLLED = 7;
 
-    function __construct(Contact $viewer, $flags = 0) {
+    static private $all_set = null;
+
+    /** @param int $flags */
+    function __construct(Contact $viewer, $flags) {
         $this->conf = $viewer->conf;
         $this->viewer = $viewer;
-        $ce = [];
-        if ($flags & self::COLLEGE) {
-            $ce[] = "college";
+        if ($flags !== 0) {
+            $w = [];
+            $cf = $flags & (self::COLLEGE | self::EXTENSION);
+            if ($cf === self::COLLEGE) {
+                $w[] = "college";
+            } else if ($cf === self::EXTENSION) {
+                $w[] = "extension";
+            }
+            $ef = $flags & (self::ENROLLED | self::DROPPED);
+            if ($ef === self::ENROLLED) {
+                $w[] = "not dropped";
+            } else if ($ef === self::DROPPED) {
+                $w[] = "dropped";
+            }
+            if (!($flags & self::TF)) {
+                $w[] = "roles=0";
+            } else if ($flags === self::TF) {
+                $w[] = "roles!=0 and (roles&1)!=0";
+            }
+            $result = $this->conf->qe("select *, coalesce((select group_concat(type, ' ', pset, ' ', link) from ContactLink where cid=ContactInfo.contactId),'') contactLinks from ContactInfo where " . join(" and ", $w));
+            while (($u = Contact::fetch($result, $this->conf))) {
+                $this->_u[$u->contactId] = $u;
+                $u->student_set = $this;
+            }
+            Dbl::free($result);
+            $this->_ua = array_values($this->_u);
+        } else {
+            $this->_ua = [];
         }
-        if ($flags & self::EXTENSION) {
-            $ce[] = "extension";
+        if ($flags === self::ALL && $viewer->isPC && !self::$all_set) {
+            self::$all_set = $this;
         }
-        $ce = $ce ? join(" or ", $ce) : "college or extension";
-        $ed = [];
-        if ($flags & self::ENROLLED) {
-            $ed[] = "not dropped";
-        }
-        if ($flags & self::DROPPED) {
-            $ed[] = "dropped";
-        }
-        $ed = $ed ? join(" or ", $ed) : "true";
-        $result = $this->conf->qe("select *, (select group_concat(type, ' ', pset, ' ', link) from ContactLink where cid=ContactInfo.contactId) contactLinks from ContactInfo where ($ce) and ($ed)");
-        while (($u = Contact::fetch($result, $this->conf))) {
-            $this->_u[$u->contactId] = $u;
-            $u->student_set = $this;
-        }
-        $this->_ua = array_values($this->_u);
-        Dbl::free($result);
     }
 
-    function load_pset(Pset $pset) {
+    /** @return StudentSet */
+    static function make_empty_for(Contact $viewer, Contact $user) {
+        $ss = new StudentSet($viewer, 0);
+        $ss->_u[$user->contactId] = $user;
+        $ss->_ua[] = $user;
+        $user->student_set = $ss;
+        $ss->_infos = [];
+        return $ss;
+    }
+
+    /** @return StudentSet */
+    static function make_for(Contact $viewer, $users) {
+        $ss = new StudentSet($viewer, 0);
+        foreach ($users as $u) {
+            $ss->_u[$u->contactId] = $u;
+            $ss->_ua[] = $u;
+            $u->student_set = $ss;
+        }
+        return $ss;
+    }
+
+    /** @return StudentSet */
+    static function make_all(Conf $conf) {
+        return self::$all_set ?? new StudentSet($conf->site_contact(), self::ALL);
+    }
+
+    function add_info(PsetView $info) {
+        assert(isset($this->_infos) && isset($this->_u[$info->user->contactId]));
+        $this->_infos["{$info->user->contactId},{$info->pset->id}"] = $info;
+        $this->_flags[$info->pset->id] = $this->_flags[$info->pset->id] ?? 0;
+    }
+
+    private function load_pset(Pset $pset) {
         assert($this->conf === $pset->conf);
-        if (isset($this->_pset_loaded[$pset->id])) {
+        if (isset($this->_flags[$pset->id]) || isset($this->_infos)) {
             return;
         }
-        $this->_pset_loaded[$pset->id] = true;
 
         $result = $this->conf->qe("select * from ContactGrade where pset=?", $pset->id);
-        while ($result && ($cg = $result->fetch_object())) {
-            $this->_cg["$pset->id,$cg->cid"] = $cg;
+        $any_upi = false;
+        while (($upi = UserPsetInfo::fetch($result))) {
+            $upi->sset_next = $this->_upi[$upi->cid] ?? null;
+            $this->_upi[$upi->cid] = $upi;
+            $any_upi = true;
         }
         Dbl::free($result);
+
         if (!$pset->gitless_grades) {
             $result = $this->conf->qe("select * from RepositoryGrade where pset=?", $pset->id);
-            while ($result && ($rg = $result->fetch_object())) {
-                $this->_rg["$pset->id,$rg->repoid,$rg->branchid"] = $rg;
+            while (($rpi = RepositoryPsetInfo::fetch($result))) {
+                $rpi->sset_next = $this->_rpi[$rpi->repoid] ?? null;
+                $this->_rpi[$rpi->repoid] = $rpi;
             }
             Dbl::free($result);
 
+            $want_cbr = isset($this->_cpi_by_repo);
             $result = $this->conf->qe("select * from CommitNotes where pset=?", $pset->id);
-            while ($result && ($cn = $result->fetch_object())) {
-                $this->_cn["$pset->id,$cn->bhash"] = $cn;
+            while (($cpi = CommitPsetInfo::fetch($result))) {
+                $cpi->sset_next = $this->_cpi[$cpi->bhash] ?? null;
+                $this->_cpi[$cpi->bhash] = $cpi;
+                if ($want_cbr) {
+                    $cpi->sset_repo_next = $this->_cpi_by_repo[$cpi->repoid] ?? null;
+                    $this->_cpi_by_repo[$cpi->repoid] = $cpi;
+                }
             }
             Dbl::free($result);
         }
@@ -100,8 +179,11 @@ class StudentSet implements Iterator, Countable {
                 Dbl::free($result);
             }
         }
+
+        $this->_flags[$pset->id] = $any_upi ? 0 : self::NO_UPI;
     }
 
+    /** @param ?bool $anonymous */
     function set_pset(Pset $pset, $anonymous = null) {
         assert($this->conf === $pset->conf);
         if ($anonymous === null) {
@@ -125,57 +207,169 @@ class StudentSet implements Iterator, Countable {
         }
     }
 
+    /** @return array<int,Contact> */
     function users() {
         return $this->_u;
     }
 
+    /** @param int $cid
+     * @return ?Contact */
     function user($cid) {
-        return get($this->_u, $cid);
+        return $this->_u[$cid] ?? null;
     }
 
+    /** @param int $cid
+     * @return ?PsetView */
     function info($cid) {
-        $u = $this->user($cid);
-        return $u ? PsetView::make_from_set_at($this, $u, $this->pset) : null;
+        return $this->pset ? $this->info_at($cid, $this->pset) : null;
     }
 
+    /** @param int $cid
+     * @return ?PsetView */
     function info_at($cid, Pset $pset) {
         $u = $this->user($cid);
-        return $u ? PsetView::make_from_set_at($this, $u, $pset) : null;
-    }
-
-    function repo_at(Contact $user, Pset $pset) {
-        $this->load_pset($pset);
-        $repoid = $user->link(LINK_REPO, $pset->id);
-        return $repoid ? get($this->_repo, $repoid) : null;
-    }
-
-    function contact_grade_at(Contact $user, Pset $pset) {
-        if ($pset->gitless_grades) {
-            $this->load_pset($pset);
-            return get($this->_cg, "$pset->id,$user->contactId");
-        } else {
+        if ($u === null) {
             return null;
+        } else if ($this->_infos !== null) {
+            return $this->_infos["{$cid},{$pset->id}"] ?? null;
+        } else {
+            return PsetView::make_from_set_at($this, $u, $pset);
         }
     }
 
-    function repo_grade_with_notes_at(Contact $user, Pset $pset) {
+    /** @return list<PsetView> */
+    function infos($cid) {
+        assert($this->_infos !== null && isset($this->_u[$cid]));
+        $infos = [];
+        foreach ($this->_infos as $info) {
+            if ($info->user->contactId === $cid)
+                $infos[] = $info;
+        }
+        return $infos;
+    }
+
+    /** @return ?PsetView */
+    function info_for(Contact $user, Pset $pset) {
+        if ($this->_infos !== null) {
+            return $this->_infos["{$user->contactId},{$pset->id}"] ?? null;
+        } else {
+            return PsetView::make_from_set_at($this, $user, $pset);
+        }
+    }
+
+
+    /** @return ?Repository */
+    function repo_at(Contact $user, Pset $pset) {
+        $this->load_pset($pset);
+        $repoid = $user->link(LINK_REPO, $pset->id);
+        return $repoid ? $this->_repo[$repoid] ?? null : null;
+    }
+
+    /** @return ?UserPsetInfo */
+    function upi_for(Contact $user, Pset $pset) {
+        $this->load_pset($pset);
+        if (($this->_flags[$pset->id] ?? 0) & self::NO_UPI) {
+            return null;
+        } else {
+            $upi = $this->_upi[$user->contactId] ?? null;
+            while ($upi && $upi->pset !== $pset->id) {
+                $upi = $upi->sset_next;
+            }
+            return $upi;
+        }
+    }
+
+    /** @return ?RepositoryPsetInfo */
+    function rpi_for(Contact $user, Pset $pset) {
         if (!$pset->gitless_grades) {
             $this->load_pset($pset);
             $repoid = $user->link(LINK_REPO, $pset->id);
             $branchid = $user->branchid($pset);
-            $rg = get($this->_rg, "$pset->id,$repoid,$branchid");
-            if ($rg && !property_exists($rg, "bhash")) {
-                $cn = $rg->gradebhash ? get($this->_cn, "$pset->id,$rg->gradebhash") : null;
-                $rg->bhash = $cn ? $cn->bhash : null;
-                $rg->notes = $cn ? $cn->notes : null;
-                $rg->notesversion = $cn ? $cn->notesversion : null;
+            $rpi = $this->_rpi[$repoid] ?? null;
+            while ($rpi && ($rpi->pset !== $pset->id || $rpi->branchid !== $branchid)) {
+                $rpi = $rpi->sset_next;
             }
-            return $rg;
+            return $rpi;
         } else {
             return null;
         }
     }
 
+    /** @return ?CommitPsetInfo */
+    function cpi_for($bhash, Pset $pset) {
+        $cpi = $this->_cpi[$bhash] ?? null;
+        while ($cpi && $cpi->pset !== $pset->id) {
+            $cpi = $cpi->sset_next;
+        }
+        return $cpi;
+    }
+
+    /** @return list<CommitPsetInfo> */
+    function all_cpi_for(Contact $user, Pset $pset) {
+        $cpis = [];
+        if (!$pset->gitless_grades) {
+            if (!isset($this->_cpi_by_repo)) {
+                $this->_cpi_by_repo = [];
+                foreach ($this->_cpi as $cpi) {
+                    while ($cpi !== null) {
+                        $cpi->sset_repo_next = $this->_cpi_by_repo[$cpi->repoid] ?? null;
+                        $this->_cpi_by_repo[$cpi->repoid] = $cpi;
+                        $cpi = $cpi->sset_next;
+                    }
+                }
+            }
+
+            $this->load_pset($pset);
+            $repoid = $user->link(LINK_REPO, $pset->id);
+            $cpi = $this->_cpi_by_repo[$repoid] ?? null;
+            $any_nullts = false;
+            while ($cpi) {
+                if ($cpi->pset === $pset->id) {
+                    $cpis[] = $cpi;
+                    $any_nullts = $any_nullts || $cpi->commitat === null;
+                }
+                $cpi = $cpi->sset_repo_next;
+            }
+
+            if ($any_nullts) {
+                $this->_update_cpi_commitat($cpis, $repoid);
+            }
+            usort($cpis, function ($a, $b) {
+                if ($a->commitat < $b->commitat) {
+                    return -1;
+                } else if ($a->commitat > $b->commitat) {
+                    return 0;
+                } else {
+                    return strcmp($a->hash, $b->hash);
+                }
+            });
+        }
+        return $cpis;
+    }
+
+    private function _update_cpi_commitat($cpis, $repoid) {
+        if (($repo = $this->_repo[$repoid] ?? null)) {
+            $mqe = Dbl::make_multi_qe_stager($this->conf->dblink);
+            foreach ($cpis as $cpi) {
+                if ($cpi->commitat === null
+                    && ($c = $repo->connected_commit($cpi->hash))) {
+                    $cpi->commitat = $c->commitat;
+                    $mqe("update CommitNotes set commitat=? where pset=? and bhash=?",
+                         [$cpi->commitat, $cpi->pset, $cpi->bhash]);
+                }
+            }
+            $mqe(true);
+        }
+    }
+
+    /** @return \Generator<PsetView> */
+    function all_info_for(Contact $user, Pset $pset) {
+        foreach ($this->all_cpi_for($user, $pset) as $cpi) {
+            yield PsetView::make_from_set_at($this, $user, $pset, $cpi->bhash);
+        }
+    }
+
+    /** @return bool */
     function repo_sharing(Contact $user) {
         assert(!$this->pset->gitless);
         if (($repoid = $user->link(LINK_REPO, $this->_psetid))) {
@@ -186,42 +380,56 @@ class StudentSet implements Iterator, Countable {
                 $sharers = array_diff($sharers, $user->links(LINK_PARTNER, $this->_psetid));
             }
             return !empty($sharers);
-        } else
+        } else {
             return false;
+        }
     }
 
 
+    /** @return PsetView */
     function current() {
         return PsetView::make_from_set_at($this, $this->_ua[$this->_upos], $this->pset);
     }
+
+    /** @return int */
     function key() {
         return $this->_ua[$this->_upos]->contactId;
     }
+
+    /** @return void */
     function next() {
         ++$this->_upos;
         while ($this->_upos < count($this->_ua)
-               && $this->_ua[$this->_upos]->dropped
-               && $this->pset) {
-            $u = $this->_ua[$this->_upos];
+               && ($u = $this->_ua[$this->_upos])
+               && $this->pset
+               && ($u->dropped || $u->isPC)) {
             if ($this->pset->gitless_grades) {
-                if (get($this->_cg, "$this->_psetid,$u->contactId"))
+                if ($this->upi_for($u, $this->pset)) {
                     break;
+                }
             } else {
-                if ($u->link(LINK_REPO, $this->_psetid))
+                if ($u->link(LINK_REPO, $this->_psetid)) {
                     break;
+                }
             }
             ++$this->_upos;
         }
     }
+
+    /** @return void */
     function rewind() {
+        assert($this->_infos === null);
         $this->_upos = -1;
         $this->next();
     }
+
+    /** @return bool */
     function valid() {
         return $this->_upos < count($this->_ua);
     }
 
 
+    /** @return int */
     function count() {
         return count($this->_ua);
     }

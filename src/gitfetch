@@ -21,7 +21,7 @@ if [ ! -d "$GIT_REPOCACHE" -o -z "$GIT_USERNAME" -o -z "$GIT_PASSWORD" ]; then
     usage 1
 fi
 
-force= refresh= username= url= repo= types=
+force= refresh= username= url= repo= types= mainbranch=
 while true; do
     case "$1" in
     -f|--f|--fo|--for|--forc|--force)
@@ -34,6 +34,8 @@ while true; do
         repo=y; types="1$types"; shift;;
     --url)
         url=y; types="1$types"; shift;;
+    -m)
+        mainbranch="$2"; shift 2;;
     -*)
         usage 1;;
     *)
@@ -172,12 +174,27 @@ find_distinct_heads () {
 
 update=
 if [ $gitfetch_status = 0 ]; then
-    cur_head=`cat .git/refs/remotes/repo$repoid/master`
+    if test -f .git/refs/remotes/repo$repoid/$mainbranch; then
+        cur_head=`cat .git/refs/remotes/repo$repoid/$mainbranch`
+    elif test -f .git/refs/remotes/repo$repoid/master; then
+        cur_head=`cat .git/refs/remotes/repo$repoid/master`
+    else
+        potential_branch="`ls .git/refs/remotes/repo$repoid | head -n 1`"
+        if test -n "$potential_branch"; then
+            cur_head=`cat .git/refs/remotes/repo$repoid/$potential_branch`
+        else
+            cur_head=
+        fi
+    fi
     tags="`git tag -l "repo$repoid.snap*" | sort -r`"
     last_tag=`echo $tags | tr ' ' '\n' | head -n 1`
     last_tag_head=`test -n "$last_tag" && cat .git/refs/tags/$last_tag`
     new_head=
-    update="snaphash='$cur_head', working=$snaptime, $update"
+    if [ -z "$cur_head" -o "$cur_head" = 0000000000000000000000000000000000000000 ]; then
+        update="snaphash=null, working=$snaptime, $update"
+    else
+        update="snaphash='$cur_head', working=$snaptime, $update"
+    fi
     if [ -n "$cur_head" -a "$last_tag_head" != "$cur_head" ]; then
         git tag "repo$repoid.snap$snapnow" $cur_head
         update="snapat='$snaptime', $update"

@@ -16,7 +16,7 @@ if (isset($Qreq->u)
     redirectSelf(["u" => null]);
 }
 assert($User === $Me || $Me->isPC);
-Ht::stash_script("peteramati_uservalue=" . json_encode_browser($Me->user_linkpart($User)));
+$Conf->set_siteinfo("uservalue", $Me->user_linkpart($User));
 
 $Pset = ContactView::find_pset_redirect($Qreq->pset);
 if ($Pset->gitless) {
@@ -30,10 +30,7 @@ if (!$Info->repo) {
 }
 if (!$Qreq->commit || !$Qreq->commit1) {
     if (!$Qreq->commit1) {
-        if (!$Info->set_hash(null)) {
-            $Me->escape();
-        }
-        $Qreq->commit1 = $Info->commit_hash();
+        $Qreq->commit1 = $Info->hash();
     }
     if (!$Qreq->commit) {
         $Qreq->commit = $Info->derived_handout_hash();
@@ -58,17 +55,12 @@ if (!$commita || !$commitb) {
 }
 $Info->set_hash($commitb->hash);
 
-$diff_options = [
-    "wdiff" => false,
-    "no_full" => !$Pset->is_handout($commita) || $Pset->is_handout($commitb)
-];
 if ($commita->hash === $Info->grading_hash()) {
     $commita->subject .= "  ✱"; // space, nbsp
 }
 if ($commitb->hash === $Info->grading_hash()) {
     $commitb->subject .= "  ✱"; // space, nbsp
 }
-$TABWIDTH = $Info->commit_info("tabwidth") ? : 4;
 
 
 $Conf->header(htmlspecialchars($Pset->title), "home");
@@ -95,7 +87,6 @@ echo "<table><tr><td><h2>diff</h2></td><td style=\"padding-left:10px;line-height
 
 // collect diff and sort line notes
 $lnorder = $Pset->is_handout($commitb) ? $Info->empty_line_notes() : $Info->viewable_line_notes();
-$diff = $Info->diff($commita, $commitb, $lnorder, $diff_options);
 
 // print line notes
 $notelinks = array();
@@ -108,19 +99,19 @@ if (!empty($notelinks)) {
     ContactView::echo_group("notes", join(", ", $notelinks));
 }
 
+$diff = $Info->diff($commita, $commitb, $lnorder, [
+    "no_full" => !$Pset->is_handout($commita) || $Pset->is_handout($commitb),
+    "no_user_collapse" => true
+]);
 if ($diff) {
-    echo '<div class="pa-diffset pa-with-diffbar">';
-    PsetView::echo_pa_diffbar(false);
-
+    echo '<div class="pa-diffset">';
     // diff and line notes
     foreach ($diff as $file => $dinfo) {
-        $open = $lnorder->file_has_notes($file) || !$dinfo->boring || empty($notelinks);
-        $Info->echo_file_diff($file, $dinfo, $lnorder, ["open" => $open, "only_diff" => true]);
+        $Info->echo_file_diff($file, $dinfo, $lnorder, ["only_diff" => true]);
     }
-
     echo '</div>';
 }
 
-Ht::stash_script('$(".pa-note-entry").autogrow();jQuery(window).on("beforeunload",pa_beforeunload)');
+Ht::stash_script('$(".pa-note-entry").autogrow();jQuery(window).on("beforeunload",$pa.beforeunload)');
 echo "</div><hr class=\"c\" />\n";
 $Conf->footer();

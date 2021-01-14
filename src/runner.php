@@ -7,32 +7,50 @@ class RunnerException extends Exception {
 }
 
 class RunnerState {
+    /** @var Conf */
     public $conf;
+    /** @var PsetView */
     public $info;
+    /** @var Repository */
     public $repo;
+    /** @var ?int */
     public $repoid;
+    /** @var Pset */
     public $pset;
+    /** @var RunnerConfig */
     public $runner;
-
+    /** @var ?string */
     public $logdir;
 
+    /** @var ?int */
     public $checkt;
+    /** @var ?int */
     public $queueid;
+    /** @var string */
+    private $basefile;
+    /** @var string */
     private $logfile;
+    /** @var ?string */
     private $timingfile;
-    private $lockfile;
+    /** @var ?string */
+    private $pidfile;
+    /** @var ?string */
     private $inputfifo;
     private $logstream;
+    /** @var string */
     private $username;
+    /** @var string */
     private $userhome;
+    /** @var string */
     private $jaildir;
+    /** @var string */
     private $jailhomedir;
 
     private $_logged_checkts;
-    private $_running_checkts;
+    /** @var ?list<RunOverlayConfig> */
+    private $_overlay;
 
     function __construct(PsetView $info, RunnerConfig $runner, $checkt = null) {
-        global $ConfSitePATH;
         $this->conf = $info->conf;
         $this->info = $info;
         $this->repo = $info->repo;
@@ -42,12 +60,13 @@ class RunnerState {
         assert(!$runner->command || $this->repoid);
 
         if (!$this->pset->gitless) {
-            $this->logdir = $ConfSitePATH . "/log/run" . $this->repo->cacheid
-                . ".pset" . $this->pset->id;
+            $root = SiteLoader::$root;
+            $this->logdir = "{$root}/log/run{$this->repo->cacheid}.pset{$this->pset->id}";
             if (!is_dir($this->logdir)) {
                 $old_umask = umask(0);
-                if (!mkdir($this->logdir, 02770, true))
+                if (!mkdir($this->logdir, 02770, true)) {
                     throw new RunnerException("Cannot create log directory");
+                }
                 umask($old_umask);
             }
         }
@@ -60,10 +79,10 @@ class RunnerState {
     function expand($x) {
         if (strpos($x, '${') !== false) {
             $x = str_replace('${REPOID}', $this->repoid, $x);
-            $x = str_replace('${PSET}', $this->pset->id, $x);
+            $x = str_replace('${PSET}', (string) $this->pset->id, $x);
             $x = str_replace('${CONFDIR}', "conf/", $x);
             $x = str_replace('${SRCDIR}', "src/", $x);
-            $x = str_replace('${HOSTTYPE}', $this->conf->opt("hostType", ""), $x);
+            $x = str_replace('${HOSTTYPE}', $this->conf->opt("hostType") ?? "", $x);
             $x = str_replace('${COMMIT}', $this->info->commit_hash(), $x);
             $x = str_replace('${HASH}', $this->info->commit_hash(), $x);
         }
@@ -71,25 +90,9 @@ class RunnerState {
     }
 
 
-    function running_checkts() {
-        if ($this->_running_checkts === null) {
-            $logfs = glob($this->logdir . "/repo" . $this->repoid
-                          . ".pset" . $this->pset->id . ".*.log.pid");
-            $this->_running_checkts = [];
-            foreach ($logfs as $f) {
-                $rp = strlen($f);
-                $lp = strrpos($f, ".", -9);
-                $this->_running_checkts[] = intval(substr($f, $lp, $rp - $lp));
-            }
-            rsort($this->_running_checkts);
-        }
-        return $this->_running_checkts;
-    }
-
     function logged_checkts() {
         if ($this->_logged_checkts === null) {
-            $logfs = glob($this->logdir . "/repo" . $this->repoid
-                          . ".pset" . $this->pset->id . ".*.log");
+            $logfs = glob("{$this->logdir}/repo{$this->repoid}.pset{$this->pset->id}.*.log");
             $this->_logged_checkts = [];
             foreach ($logfs as $f) {
                 $rp = strlen($f);
@@ -102,33 +105,21 @@ class RunnerState {
     }
 
     function job_status($checkt, $answer = null) {
-        global $Now;
-        if (!$checkt)
+        if (!$checkt) {
             return false;
-        if (!$answer)
+        }
+        if (!$answer) {
             $answer = (object) [];
-        $logfn = $this->info->runner_logfile($checkt);
-        $lockfn = $logfn . ".pid";
-        $pid_data = @file_get_contents($lockfn);
-        if (ctype_digit(trim($pid_data))
-            && !posix_kill(trim($pid_data), 0)
-            && posix_get_last_error() == 3 /* ESRCH */)
-            $pid_data = "dead\n";
-        if ($pid_data === false || $pid_data === "0\n") {
+        }
+        if ($this->running_checkt() != $checkt) {
             $answer->done = true;
             $answer->status = "done";
-        } else if ($pid_data === "" || ctype_digit(trim($pid_data))) {
+        } else {
             $answer->done = false;
             $answer->status = "working";
-            if ($Now - $checkt > 600)
+            if (Conf::$now - $checkt > 600) {
                 $answer->status = "old";
-        } else {
-            $answer->done = true;
-            $answer->status = "dead";
-        }
-        if ($answer->done && $pid_data !== false) {
-            unlink($lockfn);
-            unlink($logfn . ".in");
+            }
         }
         return $answer;
     }
@@ -141,61 +132,93 @@ class RunnerState {
                 && str_starts_with($t, "++ {")
                 && ($pos = strpos($t, "\n"))
                 && ($j = json_decode(substr($t, 3, $pos - 3)))) {
-                foreach ((array) $j as $k => $v)
+                foreach ((array) $j as $k => $v) {
                     if (!isset($answer->$k))
                         $answer->$k = $v;
+                }
             }
         }
         return $answer;
     }
 
-    function is_recent_job_running() {
-        foreach ($this->running_checkts() as $checkt) {
-            $lstatus = $this->job_status($checkt);
-            if ($lstatus && $lstatus->status === "working")
-                return true;
+    /** @return false|int */
+    function running_checkt($fn = null) {
+        $fn = $fn ?? $this->info->runner_pidfile();
+        if (($f = @fopen($fn, "r"))) {
+            $s = stream_get_contents($f);
+            $checkt = false;
+            if (($sp = strpos($s, " ")) > 0
+                && ctype_digit(substr($s, 0, $sp))) {
+                $checkt = (int) substr($s, 0, $sp);
+            }
+            if (flock($f, LOCK_SH | LOCK_NB)) {
+                if ($checkt
+                    && strpos($s, "-i")
+                    && str_ends_with($fn, ".pid")) {
+                    @unlink(substr($fn, 0, -4) . ".{$checkt}.in");
+                }
+                unlink($fn);
+                flock($f, LOCK_UN);
+                $result = false;
+            } else {
+                $result = $checkt ? : 1;
+            }
+            fclose($f);
+            return $result;
+        } else {
+            return false;
         }
-        return false;
     }
 
+    /** @return ?string */
     private function jailfiles() {
         $f = $this->pset->run_jailfiles ? : $this->conf->opt("run_jailfiles");
-        return $f ? $this->expand($f) : false;
+        return $f ? $this->expand($f) : null;
     }
 
-    private function overlayfiles() {
-        global $ConfSitePATH;
-        $f = $this->runner->overlay;
-        if (!isset($f)) {
-            $f = $this->pset->run_overlay;
-        }
+    /** @return list<string> */
+    private function jailmanifest() {
+        $f = $this->pset->run_jailmanifest;
         if ($f === null || $f === "" || $f === []) {
             return [];
         }
         if (is_string($f)) {
-            $f = [$f];
+            $f = preg_split('/\r\n|\r|\n/', $f);
         }
         for ($i = 0; $i !== count($f); ) {
             if ($f[$i] === "") {
                 array_splice($f, $i, 1);
             } else {
-                if ($f[$i][0] !== "/") {
-                    $f[$i] = $ConfSitePATH . "/" . $f[$i];
-                }
-                $f[$i] = $this->expand($f[$i]);
                 ++$i;
             }
         }
         return $f;
     }
 
+    /** @return list<RunOverlayConfig> */
+    private function overlay() {
+        if ($this->_overlay === null) {
+            $this->_overlay = [];
+            foreach ($this->runner->overlay ?? $this->pset->run_overlay ?? [] as $r) {
+                $r = clone $r;
+                if ($r->file[0] !== "/") {
+                    $r->file = SiteLoader::$root . "/" . $r->file;
+                }
+                $r->file = $this->expand($r->file);
+                $this->_overlay[] = $r;
+            }
+        }
+        return $this->_overlay;
+    }
+
+    /** @return int */
     function environment_timestamp() {
         $t = 0;
-        if (($f = $this->jailfiles()))
+        if (($f = $this->jailfiles())) {
             $t = max($t, (int) @filemtime($f));
-        if (($fs = $this->overlayfiles())) {
-            foreach ($fs as $f)
-                $t = max($t, (int) @filemtime($f));
+        }
+        foreach ($this->overlay() as $r) {
+            $t = max($t, (int) @filemtime($r->file));
         }
         return $t;
     }
@@ -208,12 +231,14 @@ class RunnerState {
     }
 
 
+    /** @param int|string $checkt
+     * @return bool */
     function set_checkt($checkt) {
         if (is_int($checkt) && $checkt > 0) {
             $this->checkt = $checkt;
         } else if (ctype_digit($checkt)) {
             $this->checkt = intval($checkt);
-        } else if (preg_match(',\.(\d+)\.log(?:\.lock|\.pid)?\z,', $checkt, $m)) {
+        } else if (preg_match('/\.(\d+)\.log(?:\.lock|\.pid)?\z/', (string) $checkt, $m)) {
             $this->checkt = intval($m[1]);
         } else {
             $this->checkt = null;
@@ -221,6 +246,8 @@ class RunnerState {
         return $this->checkt !== null;
     }
 
+    /** @param int|string $queueid
+     * @return bool */
     function set_queueid($queueid) {
         if (is_int($queueid) && $queueid > 0) {
             $this->queueid = $queueid;
@@ -244,31 +271,36 @@ class RunnerState {
     }
 
     function full_json($offset = null) {
-        if (!$this->checkt)
+        if (!$this->checkt) {
             return false;
+        }
         $json = $this->generic_json();
         $this->status_json($json);
         if ($offset !== null) {
-            $logfn = $this->info->runner_logfile($this->checkt);
-            $data = @file_get_contents($logfn, false, null, max($offset, 0));
-            if ($data === false)
+            $logbase = $this->info->runner_logbase($this->checkt);
+            $data = @file_get_contents("{$logbase}.log", false, null, max($offset, 0));
+            if ($data === false) {
                 return (object) ["error" => true, "message" => "No such log"];
+            }
             // Fix up $data if it is not valid UTF-8.
             if (!is_valid_utf8($data)) {
                 $data = UnicodeHelper::utf8_truncate_invalid($data);
-                if (!is_valid_utf8($data))
+                if (!is_valid_utf8($data)) {
                     $data = UnicodeHelper::utf8_replace_invalid($data);
+                }
             }
             // Get time data, if it exists
-            if ($this->runner->timed_replay)
+            if ($this->runner->timed_replay) {
                 $json->timed = true;
+            }
             if ($json->done
                 && $offset <= 0
                 && $this->runner->timed_replay
-                && ($time = @file_get_contents($logfn . ".time")) !== false) {
+                && ($time = @file_get_contents("{$logbase}.log.time")) !== false) {
                 $json->time_data = $time;
-                if ($this->runner->timed_replay !== true)
+                if ($this->runner->timed_replay !== true) {
                     $json->time_factor = $this->runner->timed_replay;
+                }
             }
             $json->data = $data;
             $json->offset = max($offset, 0);
@@ -278,69 +310,79 @@ class RunnerState {
     }
 
     function write($data) {
-        global $ConfSitePATH;
-        if (!$this->checkt)
+        if (!$this->checkt) {
             return false;
-        $logfn = $this->info->runner_logfile($this->checkt);
-        $proc = proc_open("$ConfSitePATH/jail/pa-writefifo " . escapeshellarg($logfn . ".in"),
+        }
+        $logbase = $this->info->runner_logbase($this->checkt);
+        $proc = proc_open(SiteLoader::$root . "/jail/pa-writefifo " . escapeshellarg("{$logbase}.in"),
                           [["pipe", "r"]], $pipes);
         if ($pipes[0]) {
             fwrite($pipes[0], $data);
             fclose($pipes[0]);
         }
-        if ($proc)
+        if ($proc) {
             proc_close($proc);
+        }
         return true;
     }
 
 
     function start($queue) {
-        global $ConfSitePATH;
         assert($this->checkt === null && $this->logfile === null);
 
         // collect user information
-        $this->username = "jail61user";
-        if ($this->runner->username)
+        if ($this->runner->username) {
             $this->username = $this->runner->username;
-        else if ($this->pset->run_username)
+        } else if ($this->pset->run_username) {
             $this->username = $this->pset->run_username;
-        if (!preg_match('/\A\w+\z/', $this->username))
+        } else {
+            $this->username = "jail61user";
+        }
+        if (!preg_match('/\A\w+\z/', $this->username)) {
             throw new RunnerException("Bad run_username");
+        }
 
         $info = posix_getpwnam($this->username);
         $this->userhome = $info ? $info["dir"] : "/home/jail61";
-        $this->userhome = preg_replace(',/+\z,', '', $this->userhome);
+        $this->userhome = preg_replace('/\/+\z/', '', $this->userhome);
 
-        $this->jaildir = preg_replace(',/+\z,', '', $this->expand($this->pset->run_dirpattern));
-        if (!$this->jaildir)
+        $this->jaildir = preg_replace('/\/+\z/', '', $this->expand($this->pset->run_dirpattern));
+        if (!$this->jaildir) {
             throw new RunnerException("Bad run_dirpattern");
+        }
+        $this->jailhomedir = $this->jaildir . "/" . preg_replace('/\A\/+/', '', $this->userhome);
 
-        $this->jailhomedir = $this->jaildir . "/" . preg_replace(',\A/+,', '', $this->userhome);
-
-        if (!chdir($ConfSitePATH))
+        if (!chdir(SiteLoader::$root)) {
             throw new RunnerException("Can’t cd to main directory");
-        if (!is_executable("jail/pa-jail"))
+        } else if (!is_executable("jail/pa-jail")) {
             throw new RunnerException("The pa-jail program has not been compiled");
+        } else if ($this->running_checkt()) {
+            throw new RunnerException("Recent job still running");
+        }
 
-        // create logfile and lockfile
+        // create logfile and pidfile
         $this->checkt = time();
-        $this->logfile = $this->info->runner_logfile($this->checkt);
-        $this->timingfile = $this->logfile . ".time";
-        $this->lockfile = $this->logfile . ".pid";
-        file_put_contents($this->lockfile, "");
-        $this->inputfifo = $this->logfile . ".in";
-        if (!posix_mkfifo($this->inputfifo, 0660))
+        $logbase = $this->info->runner_logbase($this->checkt);
+        $this->logfile = "{$logbase}.log";
+        $this->timingfile = "{$logbase}.log.time";
+        $this->pidfile = $this->info->runner_pidfile();
+        file_put_contents($this->pidfile, "");
+        $this->inputfifo = "{$logbase}.in";
+        if (!posix_mkfifo($this->inputfifo, 0660)) {
             $this->inputfifo = null;
-        if ($this->runner->timed_replay)
+        }
+        if ($this->runner->timed_replay) {
             touch($this->timingfile);
+        }
         $this->logstream = fopen($this->logfile, "a");
-        if ($queue)
+        if ($queue) {
             Dbl::qe("update ExecutionQueue set runat=?, status=1, lockfile=?, inputfifo=? where queueid=?",
-                    $this->checkt, $this->lockfile, $this->inputfifo, $queue->queueid);
+                    $this->checkt, $this->pidfile, $this->inputfifo, $queue->queueid);
+        }
         register_shutdown_function(array($this, "cleanup"));
 
         // print json to first line
-        $runsettings = $this->info->commit_info("runsettings");
+        $runsettings = $this->info->commit_jnote("runsettings");
         $json = (object) [
             "repoid" => $this->repoid, "pset" => $this->pset->urlkey,
             "timestamp" => $this->checkt, "hash" => $this->info->commit_hash(),
@@ -348,76 +390,93 @@ class RunnerState {
         ];
         if ($runsettings) {
             $json->settings = [];
-            foreach ($runsettings as $k => $v)
+            foreach ($runsettings as $k => $v) {
                 $json->settings[$k] = $v;
+            }
         }
         fwrite($this->logstream, "++ " . json_encode($json) . "\n");
 
         // create jail
         $this->remove_old_jails();
-        if ($this->run_and_log("jail/pa-jail add " . escapeshellarg($this->jaildir) . " " . escapeshellarg($this->username)))
+        if ($this->run_and_log("jail/pa-jail add " . escapeshellarg($this->jaildir) . " " . escapeshellarg($this->username))) {
             throw new RunnerException("Can’t initialize jail");
+        }
 
         // check out code
         $this->checkout_code();
 
         // save commit settings
-        $this->add_run_settings($this->info->commit_info("runsettings"));
+        $this->add_run_settings($this->info->commit_jnote("runsettings"));
 
         // actually run
         $command = "echo; jail/pa-jail run"
-            . " -p" . escapeshellarg($this->lockfile);
+            . " -p" . escapeshellarg($this->pidfile)
+            . " -P'{$this->checkt} $$"
+            . ($this->inputfifo ? " -i" : "") . "'";
         if ($this->runner->timed_replay) {
             $command .= " -t" . escapeshellarg($this->timingfile);
         }
 
         $skeletondir = $this->pset->run_skeletondir ? : $this->conf->opt("run_skeletondir");
         $binddir = $this->pset->run_binddir ? : $this->conf->opt("run_binddir");
-        if ($skeletondir && $binddir && !is_dir("$skeletondir/proc"))
+        if ($skeletondir && $binddir && !is_dir("$skeletondir/proc")) {
             $binddir = false;
+        }
         $jfiles = $this->jailfiles();
 
         if ($skeletondir && $binddir) {
-            $binddir = preg_replace(',/+\z,', '', $binddir);
+            $binddir = preg_replace('/\/+\z/', '', $binddir);
             $contents = "/ <- " . $skeletondir . " [bind-ro";
             if ($jfiles
                 && !preg_match('/[\s\];]/', $jfiles)
-                && ($jhash = hash_file("sha256", $jfiles)) !== false)
+                && ($jhash = hash_file("sha256", $jfiles)) !== false) {
                 $contents .= " $jhash $jfiles";
+            }
             $contents .= "]\n"
-                . $this->userhome . " <- " . $this->jailhomedir . " [bind]\n";
+                . $this->userhome . " <- " . $this->jailhomedir . " [bind]";
             $command .= " -u" . escapeshellarg($this->jailhomedir)
                 . " -F" . escapeshellarg($contents);
             $homedir = $binddir;
         } else if ($jfiles) {
             $command .= " -h -f" . escapeshellarg($jfiles);
-            if ($skeletondir)
+            if ($skeletondir) {
                 $command .= " -S" . escapeshellarg($skeletondir);
+            }
             $homedir = $this->jaildir;
-        } else
+        } else {
             throw new RunnerException("Missing jail population configuration");
+        }
 
-        if ($this->runner->timeout > 0)
-            $command .= " -T" . $this->runner->timeout;
-        else if ($this->runner->timeout == null && $this->pset->run_timeout > 0)
-            $command .= " -T" . $this->pset->run_timeout;
-        if ($this->inputfifo)
+        $jmanifest = $this->jailmanifest();
+        if ($jmanifest) {
+            $command .= " -F" . escapeshellarg(join("\n", $jmanifest));
+        }
+
+        if (($to = $this->runner->timeout ?? $this->pset->run_timeout) > 0) {
+            $command .= " -T" . $to;
+        }
+        if (($to = $this->runner->idle_timeout ?? $this->pset->run_idle_timeout) > 0) {
+            $command .= " -I" . $to;
+        }
+        if ($this->inputfifo) {
             $command .= " -i" . escapeshellarg($this->inputfifo);
+        }
         $command .= " " . escapeshellarg($homedir)
             . " " . escapeshellarg($this->username)
             . " TERM=xterm-16color"
             . " " . escapeshellarg($this->expand($this->runner->command));
-        $this->lockfile = null; /* now owned by command */
+        $this->pidfile = null; /* now owned by command */
         return $this->run_and_log($command);
     }
 
     private function remove_old_jails() {
-        global $Now;
         while (is_dir($this->jaildir)) {
-            $Now = time();
-            $newdir = $this->jaildir . "~." . gmstrftime("%Y%m%dT%H%M%S", $Now);
-            if ($this->run_and_log("jail/pa-jail mv " . escapeshellarg($this->jaildir) . " " . escapeshellarg($newdir)))
+            Conf::set_current_time(time());
+
+            $newdir = $this->jaildir . "~." . gmstrftime("%Y%m%dT%H%M%S", Conf::$now);
+            if ($this->run_and_log("jail/pa-jail mv " . escapeshellarg($this->jaildir) . " " . escapeshellarg($newdir))) {
                 throw new RunnerException("Can’t remove old jail");
+            }
 
             $this->run_and_log("jail/pa-jail rm " . escapeshellarg($newdir), true);
             clearstatcache(false, $this->jaildir);
@@ -425,23 +484,25 @@ class RunnerState {
     }
 
     private function checkout_code() {
-        global $ConfSitePATH, $Now;
-
         $checkoutdir = $clonedir = $this->jailhomedir . "/repo";
         if ($this->repo->truncated_psetdir($this->pset)
-            && $this->pset->directory_noslash !== "")
-            $clonedir .= "/" . $this->pset->directory_noslash;
+            && $this->pset->directory_noslash !== "") {
+            $clonedir .= "/{$this->pset->directory_noslash}";
+        }
 
         fwrite($this->logstream, "++ mkdir $checkoutdir\n");
-        if (!mkdir($clonedir, 0777, true))
+        if (!mkdir($clonedir, 0777, true)) {
             throw new RunnerException("Can’t initialize user repo in jail");
+        }
 
-        $repodir = $ConfSitePATH . "/repo/repo" . $this->repo->cacheid;
+        $root = SiteLoader::$root;
+        $repodir = "{$root}/repo/repo{$this->repo->cacheid}";
 
         // need a branch to check out a specific commit
-        $branch = "jailcheckout_$Now";
-        if ($this->run_and_log("cd " . escapeshellarg($repodir) . " && git branch $branch " . $this->info->commit_hash()))
+        $branch = "jailcheckout_" . Conf::$now;
+        if ($this->run_and_log("cd " . escapeshellarg($repodir) . " && git branch $branch " . $this->info->commit_hash())) {
             throw new RunnerException("Can’t create branch for checkout");
+        }
 
         // make the checkout
         $status = $this->run_and_log("cd " . escapeshellarg($clonedir) . " && "
@@ -451,35 +512,47 @@ class RunnerState {
 
         $this->run_and_log("cd " . escapeshellarg($repodir) . " && git branch -D $branch");
 
-        if ($status)
+        if ($status) {
             throw new RunnerException("Can’t check out code into jail");
+        }
 
-        if ($this->run_and_log("cd " . escapeshellarg($clonedir) . " && rm -rf .git .gitcheckout"))
+        if ($this->run_and_log("cd " . escapeshellarg($clonedir) . " && rm -rf .git .gitcheckout")) {
             throw new RunnerException("Can’t clean up checkout in jail");
+        }
 
         // create overlay
-        if (($overlay = $this->overlayfiles()))
+        if (($overlay = $this->overlay())) {
             $this->checkout_overlay($checkoutdir, $overlay);
+        }
     }
 
+    /** @param list<RunOverlayConfig> $overlayfiles */
     function checkout_overlay($checkoutdir, $overlayfiles) {
-        foreach ($overlayfiles as $overlayfile) {
-            if (preg_match('/(?:\.tar|\.tar\.[gx]z|\.t[bgx]z|\.tar\.bz2)\z/i', $overlayfile)) {
-                $x = $this->run_and_log("cd " . escapeshellarg($checkoutdir) . " && tar -xf " . escapeshellarg($overlayfile));
+        foreach ($overlayfiles as $ro) {
+            if (preg_match('/(?:\.tar|\.tar\.[gx]z|\.t[bgx]z|\.tar\.bz2)\z/i', $ro->file)) {
+                $c = "cd " . escapeshellarg($checkoutdir) . " && tar -xf " . escapeshellarg($ro->file);
+                foreach ($ro->exclude ?? [] as $xf) {
+                    $c .= " --exclude " . escapeshellarg($xf);
+                }
+                $x = $this->run_and_log($c);
             } else {
-                fwrite($this->logstream, "++ cp " . escapeshellarg($overlayfile) . " " . escapeshellarg($checkoutdir) . "\n");
-                $rslash = strrpos($overlayfile, "/");
-                $x = !copy($overlayfile, $checkoutdir . substr($overlayfile, $rslash));
+                fwrite($this->logstream, "++ cp " . escapeshellarg($ro->file) . " " . escapeshellarg($checkoutdir) . "\n");
+                $rslash = strrpos($ro->file, "/");
+                $x = !copy($ro->file, $checkoutdir . substr($ro->file, $rslash));
             }
-            if ($x)
+            if ($x) {
                 throw new RunnerException("Can’t unpack overlay");
+            }
         }
 
         $checkout_instructions = @file_get_contents($checkoutdir . "/.gitcheckout");
-        if ($checkout_instructions)
-            foreach (explode("\n", $checkout_instructions) as $text)
-                if (substr($text, 0, 3) === "rm:")
+        if ($checkout_instructions) {
+            foreach (explode("\n", $checkout_instructions) as $text) {
+                if (substr($text, 0, 3) === "rm:") {
                     $this->run_and_log("cd " . escapeshellarg($checkoutdir) . " && rm -rf " . escapeshellarg(substr($text, 3)));
+                }
+            }
+        }
     }
 
     private function add_run_settings($s) {
@@ -493,89 +566,91 @@ class RunnerState {
                 $sh[] = "$k=" . escapeshellarg($v) . "\n";
             }
         }
-        file_put_contents($this->jailhomedir . "/config.mk", join("", $mk), true);
-        file_put_contents($this->jailhomedir . "/config.sh", join("", $sh), true);
+        file_put_contents($this->jailhomedir . "/config.mk", join("", $mk));
+        file_put_contents($this->jailhomedir . "/config.sh", join("", $sh));
     }
 
 
     private function load_queue() {
-        global $Now;
-        if ($this->queueid === null)
+        if ($this->queueid === null) {
             return null;
+        }
         $result = $this->conf->qe("select q.*,
                 count(fq.queueid) nahead,
-                min(if(fq.runat>0,fq.runat,$Now)) as head_runat,
+                min(if(fq.runat>0,fq.runat," . Conf::$now . ")) as head_runat,
                 min(fq.nconcurrent) as ahead_nconcurrent
             from ExecutionQueue q
             left join ExecutionQueue fq on (fq.queueclass=q.queueclass and fq.queueid<q.queueid)
             where q.queueid={$this->queueid} group by q.queueid");
         $queue = $result->fetch_object();
         Dbl::free($result);
-        if ($queue && $queue->repoid == $this->repoid)
+        if ($queue && $queue->repoid == $this->repoid) {
             return $queue;
-        else
+        } else {
             return null;
+        }
     }
 
     private function clean_queue($qconf) {
-        global $Now;
         assert($this->queueid !== null);
         $runtimeout = isset($qconf->runtimeout) ? $qconf->runtimeout : 300;
         $result = $this->conf->qe("select * from ExecutionQueue where queueclass=? and queueid<?", $this->runner->queue, $this->queueid);
         while (($row = $result->fetch_object())) {
             // remove dead items from queue
-            // - lockfile contains "0\n": child has exited, remove it
-            // - lockfile specified but not there
-            // - no lockfile & last update < 30sec ago
+            // - pidfile contains "0\n": child has exited, remove it
+            // - pidfile specified but not there
+            // - no pidfile & last update < 30sec ago
             // - running for more than 5min (configurable)
-            if ($row->lockfile
-                && @file_get_contents($row->lockfile) === "0\n") {
-                unlink($row->lockfile);
-                if ($row->inputfifo)
-                    unlink($row->inputfifo);
-            }
-            if (($row->lockfile
-                 && !file_exists($row->lockfile))
+            if (($row->runat > 0
+                 && $row->lockfile
+                 && $this->running_checkt($row->lockfile) != $row->runat)
                 || ($row->runat <= 0
-                    && $row->updateat < $Now - 30)
+                    && $row->updateat < Conf::$now - 30)
                 || ($runtimeout
                     && $row->runat > 0
-                    && $row->runat < $Now - $runtimeout))
+                    && $row->runat < Conf::$now - $runtimeout)) {
                 $this->conf->qe("delete from ExecutionQueue where queueid=?", $row->queueid);
+            }
         }
         Dbl::free($result);
     }
 
     function make_queue() {
-        global $Now, $PsetInfo;
-        if (!isset($this->runner->queue))
+        if (!isset($this->runner->queue)) {
             return null;
+        }
 
         if ($this->queueid === null) {
             $nconcurrent = null;
             if (isset($this->runner->nconcurrent)
-                && $this->runner->nconcurrent > 0)
+                && $this->runner->nconcurrent > 0) {
                 $nconcurrent = $this->runner->nconcurrent;
+            }
             $this->conf->qe("insert into ExecutionQueue set queueclass=?, repoid=?, insertat=?, updateat=?, runat=0, status=0, nconcurrent=?, psetid=?, runnername=?, bhash=?",
-                  $this->runner->queue, $this->repoid,
-                  $Now, $Now, $nconcurrent,
-                  $this->pset->id, $this->runner->name,
-                  hex2bin($this->info->commit_hash()));
+                    $this->runner->queue, $this->repoid,
+                    Conf::$now, Conf::$now, $nconcurrent,
+                    $this->pset->id, $this->runner->name,
+                    hex2bin($this->info->commit_hash()));
             $this->queueid = $this->conf->dblink->insert_id;
-        } else
-            $this->conf->qe("update ExecutionQueue set updateat=? where queueid=?", $Now, $this->queueid);
+        } else {
+            $this->conf->qe("update ExecutionQueue set updateat=? where queueid=?",
+                    Conf::$now, $this->queueid);
+        }
         $queue = $this->load_queue();
 
-        $qconf = get(get($PsetInfo, "_queues", []), $this->runner->queue);
-        if (!$qconf)
+        $qconf = $this->conf->config->_queues->{$this->runner->queue} ?? null;
+        if (!$qconf) {
             $qconf = (object) ["nconcurrent" => 1];
-        $nconcurrent = get($qconf, "nconcurrent", 1000);
+        }
+        $nconcurrent = $qconf->nconcurrent ?? 1000;
         if ($this->runner->nconcurrent > 0
-            && $this->runner->nconcurrent < $nconcurrent)
+            && $this->runner->nconcurrent < $nconcurrent) {
             $nconcurrent = $this->runner->nconcurrent;
-        if (get($queue, "ahead_nconcurrent") > 0
-            && $queue->ahead_nconcurrent < $nconcurrent)
+        }
+        if (($queue->ahead_nconcurrent ?? 0) > 0
+            && $queue->ahead_nconcurrent < $nconcurrent) {
             $nconcurrent = $queue->ahead_nconcurrent;
+        }
 
         for ($tries = 0; $tries < 2; ++$tries) {
             // error_log($User->seascode_username . ": $Queue->queueid, $nconcurrent, $Queue->nahead, $Queue->ahead_nconcurrent");
@@ -586,8 +661,9 @@ class RunnerState {
                 }
                 $this->clean_queue($qconf);
                 $queue = $this->load_queue();
-            } else
+            } else {
                 break;
+            }
         }
 
         // if we get here we can actually run
@@ -597,12 +673,13 @@ class RunnerState {
 
 
     function evaluate($answer) {
-        global $ConfSitePATH;
-        if (isset($this->runner->require)
-            && $this->runner->require[0] === "/")
-            require_once($this->runner->require);
-        else if (isset($this->runner->require))
-            require_once($ConfSitePATH . "/" . $this->runner->require);
+        if (isset($this->runner->require)) {
+            if ($this->runner->require[0] === "/") {
+                require_once($this->runner->require);
+            } else {
+                require_once(SiteLoader::$root . "/" . $this->runner->require);
+            }
+        }
         $answer->result = call_user_func($this->runner->eval, $this->info);
     }
 
@@ -621,42 +698,53 @@ class RunnerState {
                     && $s->hash === $this->info->commit_hash()) {
                     $checkt = $t;
                     break;
-                } else if ($n >= 200)
+                } else if ($n >= 200) {
                     break;
+                }
                 ++$n;
             }
-            if (!$checkt)
+            if (!$checkt) {
                 return (object) ["ok" => false, "run_empty" => true, "error" => "No logs yet", "error_html" => "No logs yet"];
+            }
         } else {
             $checkt = cvtint($qreq->check);
-            if ($checkt <= 0)
+            if ($checkt <= 0) {
                 return (object) ["ok" => false, "error" => "Invalid “check” argument", "error_html" => "Invalid “check” argument"];
+            }
         }
         $this->set_checkt($checkt);
 
         $offset = cvtint($qreq->offset, 0);
-        $answer = $this->full_json($offset);
-        if ($answer->status === "working") {
+        $rct = $this->running_checkt();
+        if (($rct == $this->checkt && ($qreq->stop ?? "") !== "" && $qreq->stop !== "0")
+            || ($rct == $this->checkt && ($qreq->write ?? "") !== "")) {
+            if (($qreq->write ?? "") !== "") {
+                $this->write($qreq->write);
+            }
             if ($qreq->stop) {
                 // "ESC Ctrl-C" is captured by pa-jail
                 $this->write("\x1b\x03");
-                $now = microtime(true);
-                do {
-                    $answer = $this->full_json($offset);
-                } while ($answer->status == "working"
-                         && microtime(true) - $now < 0.1);
-            } else if ($qreq->write) {
-                $this->write($qreq->write);
             }
+            $now = microtime(true);
+            do {
+                usleep(10);
+                $answer = $this->full_json($offset);
+            } while ($qreq->stop
+                     && ($rct = $this->running_checkt()) == $this->checkt
+                     && microtime(true) - $now < 0.1);
+        } else {
+            $answer = $this->full_json($offset);
         }
 
-        if ($answer->status !== "working" && $this->queueid > 0)
+        if ($answer->status !== "working" && $this->queueid > 0) {
             $this->conf->qe("delete from ExecutionQueue where queueid=? and repoid=?", $this->queueid, $this->repoid);
+        }
         if ($answer->status === "done") {
             $viewer = $this->info->viewer;
             if ($viewer->can_run($this->pset, $this->runner, $this->info->user)
-                && $this->runner->eval)
+                && $this->runner->eval) {
                 $this->evaluate($answer);
+            }
         }
 
         return $answer;
@@ -664,9 +752,11 @@ class RunnerState {
 
 
     function cleanup() {
-        if ($this->lockfile)
-            unlink($this->lockfile);
-        if ($this->lockfile && $this->inputfifo)
+        if ($this->pidfile) {
+            unlink($this->pidfile);
+        }
+        if ($this->pidfile && $this->inputfifo) {
             unlink($this->inputfifo);
+        }
     }
 }

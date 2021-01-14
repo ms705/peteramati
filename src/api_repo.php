@@ -3,24 +3,83 @@
 // HotCRP and Peteramati are Copyright (c) 2006-2019 Eddie Kohler and others
 // See LICENSE for open-source distribution terms
 
-class API_Repo {
+class Repo_API {
     static function latestcommit(Contact $user, Qrequest $qreq, APIData $api) {
         if (!$api->repo) {
             return ["hash" => false];
         }
-        $api->repo->refresh(30);
+        $fresh = 30;
+        if ($qreq->fresh !== null && ctype_digit($qreq->fresh)) {
+            $fresh = max((int) $qreq->fresh, 10);
+        }
+        $api->repo->refresh($fresh, !!$qreq->sync);
         $c = $api->repo->latest_commit($api->pset, $api->branch);
         if (!$c) {
             return ["hash" => false];
         } else if (!$user->can_view_repo_contents($api->repo, $api->branch)) {
             return ["hash" => false, "error" => "Unconfirmed repository."];
         } else {
-            $j = clone $c;
-            unset($j->fromhead);
-            $j->snaphash = $api->repo->snaphash;
-            $j->snapcheckat = $api->repo->snapcheckat;
-            return $j;
+            return [
+                "hash" => $c->hash,
+                "subject" => $c->subject,
+                "commitat" => $c->commitat,
+                "snaphash" => $api->repo->snaphash,
+                "snapcheckat" => $api->repo->snapcheckat
+            ];
         }
+    }
+
+    static function diffconfig(Contact $user, Qrequest $qreq, APIData $api) {
+        if (!$user->can_view_repo_contents($api->repo, $api->branch)
+            || ($qreq->is_post() && !$qreq->valid_post())) {
+            return ["ok" => false, "error" => "Permission error."];
+        }
+        $info = PsetView::make($api->pset, $api->user, $user);
+        if (($err = $api->prepare_commit($info))) {
+            return $err;
+        }
+        if ($qreq->is_post()) {
+            $file = str_replace("\\*", ".*", $qreq->file ?? "*");
+            $baseline = $api->pset->baseline_diffconfig($file);
+            $diff = [];
+            if (isset($qreq->markdown)) {
+                if ($qreq->markdown === "") {
+                    $diff["markdown"] = null;
+                } else if (($b = friendly_boolean($qreq->markdown)) !== null) {
+                    $diff["markdown"] = $b;
+                } else {
+                    return ["ok" => false, "error" => "Bad `markdown`."];
+                }
+            }
+            if (isset($qreq->collapse)) {
+                if ($qreq->collapse === "") {
+                    $diff["collapse"] = null;
+                } else if (($b = friendly_boolean($qreq->collapse)) !== null) {
+                    $diff["collapse"] = $b;
+                } else {
+                    return ["ok" => false, "error" => "Bad `collapse`."];
+                }
+            }
+            if (isset($qreq->tabwidth)) {
+                if ($qreq->tabwidth === "" || $qreq->tabwidth === "0") {
+                    $diff["tabwidth"] = null;
+                } else if (($i = cvtint($qreq->tabwidth)) > 0 && $i < 16) {
+                    $diff["tabwidth"] = $i;
+                } else {
+                    return ["ok" => false, "error" => "Bad `tabwidth`."];
+                }
+            }
+            if (!empty($diff)) {
+                $gr = $info->grading_commit();
+                if (!$gr || $gr->commitat === $api->commit->commitat) {
+                    $info->update_repository_notes(["diffs" => [$file => $diff]]);
+                    $info->update_commit_notes(["diffs" => [$file => array_fill_keys(array_keys($diff), null)]]);
+                } else {
+                    $info->update_commit_notes(["diffs" => [$file => $diff]]);
+                }
+            }
+        }
+        return ["ok" => true];
     }
 
     static function blob(Contact $user, Qrequest $qreq, APIData $api) {
@@ -83,7 +142,7 @@ class API_Repo {
         }
         ob_start();
         foreach ($diff as $file => $dinfo) {
-            $info->echo_file_diff($file, $dinfo, $lnorder, ["open" => true, "only_content" => true]);
+            $info->echo_file_diff($file, $dinfo, $lnorder, ["expand" => true, "only_content" => true]);
         }
         $content = ob_get_contents();
         ob_end_clean();
@@ -108,18 +167,16 @@ class API_Repo {
                 . "{ repositories(first:100, affiliations:[ORGANIZATION_MEMBER]"
                 . ($cursor ? ", after:" . json_encode($cursor) : "")
                 . ") { nodes { name, owner { login }}, pageInfo { hasNextPage, endCursor }} }}");
-            if ($gql->status !== 200
-                || !$gql->j
-                || !isset($gql->j->data)) {
+            if (!$gql->rdata) {
                 error_log(json_encode($gql));
                 return ["ok" => false, "error" => "GitHub API error."];
             }
-            foreach ($gql->j->data->user->repositories->nodes as $n) {
+            foreach ($gql->rdata->user->repositories->nodes as $n) {
                 if ($n->owner->login === $organization)
                     $repos[] = ["name" => "$organization/{$n->name}", "url" => "https://github.com/" . urlencode($organization) . "/" . urlencode($n->name)];
             }
             usort($repos, function ($a, $b) { return strnatcmp($a["name"], $b["name"]); });
-            $pageinfo = $gql->j->data->user->repositories->pageInfo;
+            $pageinfo = $gql->rdata->user->repositories->pageInfo;
             if (!$pageinfo->hasNextPage)
                 break;
             $cursor = $pageinfo->endCursor;

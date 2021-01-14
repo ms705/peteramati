@@ -4,26 +4,56 @@
 // See LICENSE for open-source distribution terms
 
 class DiffInfo implements Iterator {
+    /** @var string */
     public $filename;
+    /** @var bool */
     public $binary = false;
+    /** @var bool */
     public $truncated = false;
+    /** @var ?string */
     public $title;
+    /** @var bool */
     public $fileless = false;
-    public $boring = false;
-    private $_boring_set = false;
+    /** @var bool */
+    public $collapse = false;
+    /** @var bool */
+    private $_collapse_set = false;
+    /** @var bool */
+    public $markdown;
+    /** @var bool */
+    public $markdown_allowed;
+    /** @var bool */
+    public $highlight;
+    /** @var bool */
+    public $highlight_allowed;
+    /** @var int */
+    public $tabwidth = 4;
+    /** @var ?string */
+    public $language;
+    /** @var bool */
     public $hide_if_anonymous = false;
+    /** @var float */
     public $position = 0.0;
+    /** @var bool */
     public $removed = false;
+    /** @var bool */
     public $loaded = true;
+    /** @var list<int|string|null> */
     private $_diff = [];
+    /** @var int */
     private $_diffsz = 0;
     private $_dflags;
     private $_itpos;
 
+    /** @var ?Repository */
     private $_repoa;
+    /** @var ?Pset */
     private $_pset;
+    /** @var ?string */
     private $_hasha;
+    /** @var ?string */
     private $_filenamea;
+    /** @var ?bool */
     private $_hasha_hrepo;
 
     const MAXLINES = 8000;
@@ -31,15 +61,25 @@ class DiffInfo implements Iterator {
 
     const LINE_NONL = 1;
 
+    /** @param string $filename */
     function __construct($filename, DiffConfig $diffconfig = null) {
         $this->filename = $filename;
+        $ismd = str_ends_with($filename, ".md");
         if ($diffconfig) {
             $this->title = $diffconfig->title;
             $this->fileless = !!$diffconfig->fileless;
-            $this->boring = !!$diffconfig->boring;
-            $this->_boring_set = $diffconfig->boring !== null;
+            $this->collapse = !!$diffconfig->collapse;
+            $this->_collapse_set = isset($diffconfig->collapse);
             $this->hide_if_anonymous = !!$diffconfig->hide_if_anonymous;
             $this->position = (float) $diffconfig->position;
+            $this->markdown = $diffconfig->markdown ?? $ismd;
+            $this->markdown_allowed = $diffconfig->markdown_allowed ?? $ismd;
+            $this->highlight = !!$diffconfig->highlight;
+            $this->highlight_allowed = !!$diffconfig->highlight_allowed;
+            $this->language = $diffconfig->language;
+            $this->tabwidth = $diffconfig->tabwidth ?? 4;
+        } else {
+            $this->markdown = $this->markdown_allowed = $ismd;
         }
     }
 
@@ -52,6 +92,16 @@ class DiffInfo implements Iterator {
         $this->_hasha_hrepo = $hasha_hrepo;
     }
 
+    /** @param ?bool $collapse */
+    function set_collapse($collapse) {
+        $this->collapse = !!$collapse;
+        $this->_collapse_set = isset($collapse);
+    }
+
+    /** @param string $ch
+     * @param ?int $linea
+     * @param ?int $lineb
+     * @param string $text */
     function add($ch, $linea, $lineb, $text) {
         if ($this->truncated) {
             /* do nothing */
@@ -78,22 +128,23 @@ class DiffInfo implements Iterator {
     }
 
     function finish() {
-        if ($this->_diffsz === 4 && str_starts_with($this->_diff[3], "B")) {
+        $n = $this->_diffsz;
+        if ($n === 4 && str_starts_with($this->_diff[3], "B")) {
             $this->binary = true;
         }
-        if ($this->binary && !$this->_boring_set) {
-            $this->boring = true;
+        if ($this->binary && !$this->_collapse_set) {
+            $this->collapse = true;
         }
         if ($this->binary
             ? preg_match('_ and /dev/null differ$_', $this->_diff[3])
-            : $this->_diffsz && $this->_diff[$this->_diffsz - 2] === 0) {
+            : $n >= 4 && $this->_diff[$n - 2] === 0) {
             $this->removed = true;
         }
         // add `@@` context line at end of diff to allow expanding file
-        if ($this->_diffsz > 12
-            && $this->_diff[$this->_diffsz - 4] === ' '
-            && $this->_diff[$this->_diffsz - 8] === ' '
-            && $this->_diff[$this->_diffsz - 12] === ' ') {
+        if ($n >= 16
+            && $this->_diff[$n - 4] === ' '
+            && $this->_diff[$n - 8] === ' '
+            && $this->_diff[$n - 12] === ' ') {
             array_push($this->_diff, "@", null, null, "");
             $this->_diffsz += 4;
         }
@@ -102,20 +153,24 @@ class DiffInfo implements Iterator {
     function finish_unloaded() {
         $this->finish();
         $this->loaded = false;
+        $this->collapse = true;
     }
 
 
+    /** @return bool */
     function is_empty() {
         return $this->_diffsz === 0;
     }
 
+    /** @return bool */
     function is_handout_commit_a() {
         if ($this->_hasha_hrepo === null) {
-            $this->_hasha_hrepo = $this->_pset && $this->_pset->handout_commits($this->_hasha);
+            $this->_hasha_hrepo = $this->_pset && $this->_pset->handout_commit($this->_hasha);
         }
         return $this->_hasha_hrepo;
     }
 
+    /** @return int */
     function max_lineno() {
         $l = $this->_diffsz;
         $max = 0;
@@ -134,14 +189,19 @@ class DiffInfo implements Iterator {
         return $max;
     }
 
+    /** @param int $i
+     * @return ?array{string,?int,?int,string} */
     function entry($i) {
         if ($i >= 0 && $i < ($this->_diffsz >> 2)) {
             return array_slice($this->_diff, $i << 2, 4);
         } else {
-            return false;
+            return null;
         }
     }
 
+    /** @param int $off
+     * @param int $line
+     * @return int */
     private function line_lower_bound($off, $line) {
         $l = 0;
         $r = $this->_diffsz;
@@ -160,11 +220,15 @@ class DiffInfo implements Iterator {
         return $l;
     }
 
+    /** @param int $linea
+     * @return bool */
     function contains_linea($linea) {
         $l = $this->line_lower_bound(1, $linea);
         return $l < $this->_diffsz && $this->_diff[$l] !== "@";
     }
 
+    /** @param string $lineid
+     * @return bool */
     function contains_lineid($lineid) {
         assert($lineid[0] === "a" || $lineid[0] === "b");
         $l = $this->line_lower_bound($lineid[0] === "a" ? 1 : 2, (int) substr($lineid, 1));
@@ -190,14 +254,24 @@ class DiffInfo implements Iterator {
         }
     }
 
+    /** @param int $linea_lx
+     * @param int $linea_rx
+     * @return bool */
     function expand_linea($linea_lx, $linea_rx) {
         return $this->expand_line(1, $linea_lx, $linea_rx);
     }
 
+    /** @param int $lineb_lx
+     * @param int $lineb_rx
+     * @return bool */
     function expand_lineb($lineb_lx, $lineb_rx) {
         return $this->expand_line(2, $lineb_lx, $lineb_rx);
     }
 
+    /** @param 'a'|'b'|1|2 $off
+     * @param int $line_lx
+     * @param int $line_rx
+     * @return bool */
     function expand_line($off, $line_lx, $line_rx) {
         if ($off === "a" || $off === "b") {
             $off = ($off === "a" ? 1 : 2);
@@ -297,6 +371,9 @@ class DiffInfo implements Iterator {
         return true;
     }
 
+    /** @param int $linea_lx
+     * @param int $linea_rx
+     * @return DiffInfo */
     function restrict_linea($linea_lx, $linea_rx) {
         $l = $this->line_lower_bound(1, $linea_lx);
         $r = $this->line_lower_bound(1, $linea_rx);
@@ -331,6 +408,9 @@ class DiffInfo implements Iterator {
     }
 
 
+    /** @param DiffInfo $a
+     * @param DiffInfo $b
+     * @return int */
     static function compare($a, $b) {
         if ($a->position != $b->position) {
             return $a->position < $b->position ? -1 : 1;
@@ -340,6 +420,7 @@ class DiffInfo implements Iterator {
     }
 
 
+    /** @return array{string,?int,?int,string,?int} */
     function current() {
         $x = array_slice($this->_diff, $this->_itpos, 4);
         if ($this->_dflags !== null && isset($this->_dflags[$this->_itpos])) {
@@ -347,16 +428,41 @@ class DiffInfo implements Iterator {
         }
         return $x;
     }
+    /** @return int */
     function key() {
         return $this->_itpos >> 2;
     }
+    /** @return void */
     function next() {
         $this->_itpos += 4;
     }
+    /** @return void */
     function rewind() {
         $this->_itpos = 0;
     }
+    /** @return bool */
     function valid() {
         return $this->_itpos < $this->_diffsz;
+    }
+    /** @return string */
+    function current_expandmark() {
+        assert($this->_diff[$this->_itpos] === "@");
+        if ($this->_itpos === 0
+            && ($this->_diffsz === 4 || $this->_diff[4] !== " ")) {
+            // fully deleted or inserted
+            return "";
+        } else if ($this->_itpos === 0) {
+            $la = $lb = 1;
+        } else {
+            $la = $this->_diff[$this->_itpos - 3] + 1;
+            $lb = $this->_diff[$this->_itpos - 2] + 1;
+        }
+        assert($la !== null && $lb !== null);
+        if ($this->_itpos + 4 === $this->_diffsz) {
+            return "a{$la}b{$lb}+";
+        } else {
+            $n = $this->_diff[$this->_itpos + 6] - $lb;
+            return $n ? "a{$la}b{$lb}+$n" : "";
+        }
     }
 }

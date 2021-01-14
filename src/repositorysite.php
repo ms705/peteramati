@@ -5,6 +5,7 @@
 
 class RepositorySite {
     public $url;
+    public $siteclass;
     static public $sitemap = ["github" => "GitHub_RepositorySite", "harvardseas" => "HarvardSEAS_RepositorySite"];
 
     static function is_primary(Repository $repo = null) {
@@ -37,15 +38,19 @@ class RepositorySite {
         return $this->siteclass;
     }
 
+    /** @return string */
     function https_url() {
         return $this->url;
     }
+    /** @return string */
     function ssh_url() {
         return $this->url;
     }
+    /** @return string */
     function git_url() {
         return $this->url;
     }
+    /** @return string */
     function friendly_url() {
         return $this->url;
     }
@@ -54,44 +59,57 @@ class RepositorySite {
         return ["REPOGITURL" => null, "REPOBASE" => null];
     }
 
+    /** @return int */
     function validate_open(MessageSet $ms = null) {
         return -1;
     }
+    /** @return int */
     function validate_working(MessageSet $ms = null) {
         return -1;
     }
+    /** @return bool */
     function validate_ownership_always() {
         return true;
     }
+    /** @return int */
     function validate_ownership(Repository $repo, Contact $user, Contact $partner = null,
                                 MessageSet $ms = null) {
         return -1;
     }
 
+    /** @return -1 */
     static private function chair_error($error) {
         global $Me;
         if ($Me && $Me->privChair) {
-            $Me->conf->errorMsg($s);
+            $Me->conf->errorMsg($error);
         }
         return -1;
     }
-    static function run_remote_oauth(Conf $conf, $clientid, $token,
-                                     $gitcommand, &$output) {
-        global $ConfSitePATH, $Me;
-        if ($conf->opt("disableRemote")) {
-            if (is_string($conf->opt("disableRemote"))) {
-                self::chair_error(htmlspecialchars($conf->opt("disableRemote")));
+    /** @return 0|-1 */
+    static function disabled_remote_error(Conf $conf) {
+        if (($dr = $conf->opt("disableRemote"))) {
+            if (is_string($dr)) {
+                self::chair_error(htmlspecialchars($dr));
             }
             return -1;
+        } else {
+            return 0;
         }
-        if (!$clientid || !$token) {
+    }
+    /** @return int */
+    static function run_remote_oauth(Conf $conf, $clientid, $token,
+                                     $gitcommand, &$output) {
+        global $Me;
+        if (self::disabled_remote_error($conf) < 0) {
+            return -1;
+        } else if (!$clientid || !$token) {
             return self::chair_error("Missing OAuth client ID and/or token.");
         } else if (!ctype_alnum($token)) {
-            return $this->chair_error("Bad OAuth token.");
+            return self::chair_error("Bad OAuth token.");
         }
         putenv("GIT_USERNAME=$clientid");
         putenv("GIT_PASSWORD=$token");
-        $command = "$ConfSitePATH/jail/pa-timeout " . $conf->validate_timeout
+        $command = SiteLoader::$root . "/jail/pa-timeout " . $conf->validate_timeout
             . " git -c credential.helper= -c " . escapeshellarg("credential.helper=!f() { echo username=\$GIT_USERNAME; echo password=\$GIT_PASSWORD; }; f")
             . " " . $gitcommand;
         exec($command, $output, $status);
@@ -102,8 +120,8 @@ class RepositorySite {
 }
 
 class Bad_RepositorySite extends RepositorySite {
-    public $siteclass = "unknown";
     function __construct($url) {
         $this->url = $url;
+        $this->siteclass = "__unknown__";
     }
 }

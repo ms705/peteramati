@@ -1,7 +1,6 @@
 <?php
 // helpers.php -- HotCRP non-class helper functions
-// HotCRP is Copyright (c) 2006-2019 Eddie Kohler and Regents of the UC
-// See LICENSE for open-source distribution terms
+// Copyright (c) 2006-2020 Eddie Kohler; see LICENSE.
 
 function defappend(&$var, $str) {
     if (!isset($var))
@@ -16,11 +15,13 @@ function arrayappend(&$var, $value) {
         $var = array($value);
 }
 
+/** @return array */
 function mkarray($value) {
-    if (is_array($value))
+    if (is_array($value)) {
         return $value;
-    else
+    } else {
         return array($value);
+    }
 }
 
 function &array_ensure(&$arr, $key, $val) {
@@ -30,58 +31,39 @@ function &array_ensure(&$arr, $key, $val) {
 }
 
 function ago($t) {
-    global $Now;
-    if ($t + 60 >= $Now)
+    if ($t + 60 >= Conf::$now)
         return "less than a minute ago";
-    else if ($t + 7200 >= $Now)
-        return plural((int)(($Now - $t) / 60 + 0.5), "minute") . " ago";
-    else if ($t + 259200 >= $Now)
-        return plural((int)(($Now - $t) / 3600 + 0.5), "hour") . " ago";
+    else if ($t + 7200 >= Conf::$now)
+        return plural((int)((Conf::$now - $t) / 60 + 0.5), "minute") . " ago";
+    else if ($t + 259200 >= Conf::$now)
+        return plural((int)((Conf::$now - $t) / 3600 + 0.5), "hour") . " ago";
     else
-        return plural((int)(($Now - $t) / 86400 + 0.5), "day") . " ago";
-}
-
-function parse_time($d, $reference = null) {
-    global $Now, $Opt;
-    if ($reference === null)
-        $reference = $Now;
-    if (!isset($Opt["dateFormatTimezoneRemover"])
-        && function_exists("timezone_abbreviations_list")) {
-        $mytz = date_default_timezone_get();
-        $x = array();
-        foreach (timezone_abbreviations_list() as $tzname => $tzinfo) {
-            foreach ($tzinfo as $tz)
-                if ($tz["timezone_id"] == $mytz)
-                    $x[] = preg_quote($tzname);
-        }
-        if (count($x) == 0)
-            $x[] = preg_quote(date("T", $reference));
-        $Opt["dateFormatTimezoneRemover"] =
-            "/(?:\\s|\\A)(?:" . join("|", $x) . ")(?:\\s|\\z)/i";
-    }
-    if (@$Opt["dateFormatTimezoneRemover"])
-        $d = preg_replace($Opt["dateFormatTimezoneRemover"], " ", $d);
-    $d = preg_replace('/\butc([-+])/i', 'GMT$1', $d);
-    return strtotime($d, $reference);
+        return plural((int)((Conf::$now - $t) / 86400 + 0.5), "day") . " ago";
 }
 
 
 // string helpers
 
+/** @param null|int|string $value
+ * @return int */
 function cvtint($value, $default = -1) {
     $v = trim((string) $value);
     if (is_numeric($v)) {
         $ival = intval($v);
-        if ($ival == floatval($v))
+        if ($ival == floatval($v)) {
             return $ival;
+        }
     }
     return $default;
 }
 
+/** @param null|int|float|string $value
+ * @return int|float */
 function cvtnum($value, $default = -1) {
     $v = trim((string) $value);
-    if (is_numeric($v))
+    if (is_numeric($v)) {
         return floatval($v);
+    }
     return $default;
 }
 
@@ -89,17 +71,23 @@ function rcvtint(&$value, $default = -1) {
     return (isset($value) ? cvtint($value, $default) : $default);
 }
 
-if (!function_exists("json_encode") || !function_exists("json_decode"))
-    require_once("$ConfSitePATH/lib/json.php");
-
-if (!function_exists("json_last_error_msg")) {
-    function json_last_error_msg() {
-        return "unknown JSON error";
-    }
-}
 
 interface JsonUpdatable extends JsonSerializable {
+    /** @return bool */
     public function jsonIsReplacement();
+}
+
+class JsonReplacement implements JsonUpdatable {
+    private $x;
+    function __construct($x) {
+        $this->x = $x;
+    }
+    function jsonIsReplacement() {
+        return true;
+    }
+    function jsonSerialize() {
+        return $this->x;
+    }
 }
 
 function json_update($j, $updates) {
@@ -111,12 +99,19 @@ function json_update($j, $updates) {
     if (is_object($updates)) {
         $is_replacement = $updates instanceof JsonUpdatable
             && $updates->jsonIsReplacement();
-        if ($updates instanceof JsonSerializable)
+        if ($updates instanceof JsonSerializable) {
             $updates = $updates->jsonSerialize();
-        if ($is_replacement)
-            return $updates;
-        if (is_object($updates))
+        }
+        if ($is_replacement) {
+            if (is_associative_array($updates)) {
+                return (object) $updates;
+            } else {
+                return $updates;
+            }
+        }
+        if (is_object($updates)) {
             $updates = get_object_vars($updates);
+        }
     }
     foreach ($updates as $k => $v) {
         if ($k === "") {
@@ -134,13 +129,65 @@ function json_update($j, $updates) {
         }
     }
     $n = count($j);
-    if ($n == 0)
+    if ($n == 0) {
         return null;
-    for ($i = 0; $i !== $n; ++$i)
+    }
+    for ($i = 0; $i !== $n; ++$i) {
         if (!isset($j[$i]) && !array_key_exists($i, $j))
             return (object) $j;
+    }
     ksort($j, SORT_NUMERIC);
     return array_values($j);
+}
+
+function json_antiupdate($j, $updates) {
+    if (is_object($j)) {
+        $j = get_object_vars($j);
+    } else if (!is_array($j)) {
+        $j = [];
+    }
+    if (is_object($updates)) {
+        $is_replacement = $updates instanceof JsonUpdatable
+            && $updates->jsonIsReplacement();
+        if ($updates instanceof JsonSerializable) {
+            $updates = $updates->jsonSerialize();
+        }
+        if ($is_replacement) {
+            return $j;
+        }
+        if (is_object($updates)) {
+            $updates = get_object_vars($updates);
+        }
+    }
+    $aj = [];
+    foreach ($updates as $k => $v) {
+        if (isset($j[$k])) {
+            if (is_object($v) || is_associative_array($v)) {
+                $av = json_antiupdate($j[$k], $v);
+            } else if ($j[$k] !== $v) {
+                $av = $j[$k];
+            } else {
+                continue;
+            }
+        } else {
+            if ($v !== null) {
+                $av = null;
+            } else {
+                continue;
+            }
+        }
+        $aj[$k] = $av;
+    }
+    $n = count($aj);
+    if ($n == 0) {
+        return null;
+    }
+    for ($i = 0; $i !== $n; ++$i) {
+        if (!isset($aj[$i]) && !array_key_exists($i, $aj))
+            return (object) $aj;
+    }
+    ksort($aj, SORT_NUMERIC);
+    return array_values($aj);
 }
 
 
@@ -155,13 +202,12 @@ function hoturl_add_raw($url, $component) {
 }
 
 function hoturl($page, $param = null) {
-    global $Conf;
-    return $Conf->hoturl($page, $param);
+    return Conf::$main->hoturl($page, $param);
 }
 
+/** @deprecated */
 function hoturl_post($page, $param = null) {
-    global $Conf;
-    return $Conf->hoturl($page, $param, Conf::HOTURL_POST);
+    return Conf::$main->hoturl($page, $param, Conf::HOTURL_POST);
 }
 
 
@@ -194,7 +240,9 @@ function redirectSelf($param = []) {
 }
 
 class JsonResult {
+    /** @var ?int */
     public $status;
+    /** @var array<string,mixed> */
     public $content;
     public $has_messages = false;
 
@@ -269,8 +317,11 @@ class JsonResult {
 }
 
 class JsonResultException extends Exception {
+    /** @var JsonResult */
     public $result;
+    /** @var bool */
     static public $capturing = false;
+    /** @param JsonResult $j */
     function __construct($j) {
         $this->result = $j;
     }
@@ -282,7 +333,7 @@ function json_exit($json, $arg2 = null) {
     if (JsonResultException::$capturing) {
         throw new JsonResultException($json);
     } else {
-        if ($Qreq && $Qreq->post_ok()) {
+        if ($Qreq && $Qreq->valid_token()) {
             if ($json->status) {
                 http_response_code($json->status);
             }
@@ -296,7 +347,7 @@ function json_exit($json, $arg2 = null) {
             if (!isset($json->content["status"])) {
                 $json->content["status"] = $json->status;
             }
-            if ($Qreq->post && !$Qreq->post_ok()) {
+            if ($Qreq->post && !$Qreq->valid_token()) {
                 $json->content["postvalue"] = post_value(true);
             }
         }
@@ -350,33 +401,28 @@ function rm_rf_tempdir($tempdir) {
 }
 
 function clean_tempdirs() {
-    $dir = null;
-    if (function_exists("sys_get_temp_dir"))
-        $dir = sys_get_temp_dir();
-    if (!$dir)
-        $dir = "/tmp";
-    while (substr($dir, -1) == "/")
+    $dir = sys_get_temp_dir() ? : "/";
+    while (substr($dir, -1) === "/") {
         $dir = substr($dir, 0, -1);
+    }
     $dirh = opendir($dir);
     $now = time();
-    while (($fname = readdir($dirh)) !== false)
+    while (($fname = readdir($dirh)) !== false) {
         if (preg_match('/\Ahotcrptmp\d+\z/', $fname)
             && is_dir("$dir/$fname")
             && ($mtime = @filemtime("$dir/$fname")) !== false
             && $mtime < $now - 1800)
             rm_rf_tempdir("$dir/$fname");
+    }
     closedir($dirh);
 }
 
 function tempdir($mode = 0700) {
-    $dir = null;
-    if (function_exists("sys_get_temp_dir"))
-        $dir = sys_get_temp_dir();
-    if (!$dir)
-        $dir = "/tmp";
-    while (substr($dir, -1) == "/")
+    $dir = sys_get_temp_dir() ? : "/";
+    while (substr($dir, -1) === "/") {
         $dir = substr($dir, 0, -1);
-    for ($i = 0; $i < 100; $i++) {
+    }
+    for ($i = 0; $i !== 100; $i++) {
         $path = $dir . "/hotcrptmp" . mt_rand(0, 9999999);
         if (mkdir($path, $mode)) {
             register_shutdown_function("rm_rf_tempdir", $path);
@@ -391,14 +437,15 @@ function tempdir($mode = 0700) {
 function commajoin($what, $joinword = "and") {
     $what = array_values($what);
     $c = count($what);
-    if ($c == 0)
+    if ($c == 0) {
         return "";
-    else if ($c == 1)
+    } else if ($c == 1) {
         return $what[0];
-    else if ($c == 2)
+    } else if ($c == 2) {
         return $what[0] . " " . $joinword . " " . $what[1];
-    else
+    } else {
         return join(", ", array_slice($what, 0, -1)) . ", " . $joinword . " " . $what[count($what) - 1];
+    }
 }
 
 function prefix_commajoin($what, $prefix, $joinword = "and") {
@@ -409,63 +456,69 @@ function prefix_commajoin($what, $prefix, $joinword = "and") {
 
 function numrangejoin($range) {
     $a = [];
-    $format = null;
+    $format = $first = $last = null;
+    $intval = $plen = 0;
     foreach ($range as $current) {
-        if ($format !== null
-            && sprintf($format, $intval + 1) === (string) $current) {
-            ++$intval;
-            $last = $current;
-            continue;
-        } else {
-            if ($format !== null && $first === $last)
+        if ($format !== null) {
+            if (sprintf($format, $intval + 1) === (string) $current) {
+                ++$intval;
+                $last = $current;
+                continue;
+            } else if ($first === $last) {
                 $a[] = $first;
-            else if ($format !== null)
-                $a[] = $first . "–" . substr($last, $plen);
-            if ($current !== "" && ctype_digit($current)) {
-                $format = "%0" . strlen($current) . "d";
-                $plen = 0;
-                $first = $last = $current;
-                $intval = intval($current);
-            } else if (preg_match('/\A(\D*)(\d+)\z/', $current, $m)) {
-                $format = str_replace("%", "%%", $m[1]) . "%0" . strlen($m[2]) . "d";
-                $plen = strlen($m[1]);
-                $first = $last = $current;
-                $intval = intval($m[2]);
             } else {
-                $format = null;
-                $a[] = $current;
+                $a[] = $first . "–" . substr($last, $plen);
             }
         }
+        if ($current !== "" && ctype_digit($current)) {
+            $format = "%0" . strlen((string) $current) . "d";
+            $plen = 0;
+            $first = $last = $current;
+            $intval = intval($current);
+        } else if (preg_match('/\A(\D*)(\d+)\z/', $current, $m)) {
+            $format = str_replace("%", "%%", $m[1]) . "%0" . strlen($m[2]) . "d";
+            $plen = strlen($m[1]);
+            $first = $last = $current;
+            $intval = intval($m[2]);
+        } else {
+            $format = null;
+            $a[] = $current;
+        }
     }
-    if ($format !== null && $first === $last)
+    if ($format !== null && $first === $last) {
         $a[] = $first;
-    else if ($format !== null)
+    } else if ($format !== null) {
         $a[] = $first . "–" . substr($last, $plen);
+    }
     return commajoin($a);
 }
 
 function pluralx($n, $what) {
-    if (is_array($n))
+    if (is_array($n)) {
         $n = count($n);
-    return $n == 1 ? $what : pluralize($what);
+    }
+    return $n === 1 ? $what : pluralize($what);
 }
 
 function pluralize($what) {
-    if ($what == "this")
+    if ($what === "this") {
         return "these";
-    else if ($what == "has")
+    } else if ($what === "has") {
         return "have";
-    else if ($what == "is")
+    } else if ($what === "is") {
         return "are";
-    else if (str_ends_with($what, ")") && preg_match('/\A(.*?)(\s*\([^)]*\))\z/', $what, $m))
+    } else if (str_ends_with($what, ")")
+               && preg_match('/\A(.*?)(\s*\([^)]*\))\z/', $what, $m)) {
         return pluralize($m[1]) . $m[2];
-    else if (preg_match('/\A.*?(?:s|sh|ch|[bcdfgjklmnpqrstvxz]y)\z/', $what)) {
-        if (substr($what, -1) == "y")
+    } else if (preg_match('/\A.*?(?:s|sh|ch|[bcdfgjklmnpqrstvxz]y)\z/', $what)) {
+        if (substr($what, -1) === "y") {
             return substr($what, 0, -1) . "ies";
-        else
+        } else {
             return $what . "es";
-    } else
+        }
+    } else {
         return $what . "s";
+    }
 }
 
 function plural($n, $what) {
@@ -474,171 +527,76 @@ function plural($n, $what) {
 
 function ordinal($n) {
     $x = $n;
-    if ($x > 100)
+    if ($x > 100) {
         $x = $x % 100;
-    if ($x > 20)
+    }
+    if ($x > 20) {
         $x = $x % 10;
+    }
     return $n . ($x < 1 || $x > 3 ? "th" : ($x == 1 ? "st" : ($x == 2 ? "nd" : "rd")));
 }
 
 function tabLength($text, $all) {
     $len = 0;
-    for ($i = 0; $i < strlen($text); $i++)
-        if ($text[$i] == ' ')
-            $len++;
-        else if ($text[$i] == '\t')
+    for ($i = 0; $i < strlen($text); ++$i) {
+        if ($text[$i] === ' ') {
+            ++$len;
+        } else if ($text[$i] === '\t') {
             $len += 8 - ($len % 8);
-        else if (!$all)
+        } else if (!$all) {
             break;
-        else
-            $len++;
+        } else {
+            ++$len;
+        }
+    }
     return $len;
 }
 
+/** @param string $varname */
 function ini_get_bytes($varname, $value = null) {
     $val = trim($value !== null ? $value : ini_get($varname));
     $last = strlen($val) ? strtolower($val[strlen($val) - 1]) : ".";
+    /** @phan-suppress-next-line PhanParamSuspiciousOrder */
     return (int) ceil(floatval($val) * (1 << (+strpos(".kmg", $last) * 10)));
 }
 
-function whyNotText($whyNot, $action) {
-    global $Conf;
-    if (!is_array($whyNot))
-        $whyNot = array($whyNot => 1);
-    $paperId = (isset($whyNot['paperId']) ? $whyNot['paperId'] : -1);
-    $reviewId = (isset($whyNot['reviewId']) ? $whyNot['reviewId'] : -1);
-    $thisPaper = ($paperId < 0 ? "this paper" : "paper #$paperId");
-    $text = '';
-    if (isset($whyNot['invalidId'])) {
-        $x = $whyNot['invalidId'] . "Id";
-        $xid = (isset($whyNot[$x]) ? " \"" . $whyNot[$x] . "\"" : "");
-        $text .= "Invalid " . $whyNot['invalidId'] . " number" . htmlspecialchars($xid) . ". ";
-    }
-    if (isset($whyNot['noPaper']))
-        $text .= "No such paper" . ($paperId < 0 ? "" : " #$paperId") . ". ";
-    if (isset($whyNot['noReview']))
-        $text .= "No such review" . ($reviewId < 0 ? "" : " #$reviewId") . ". ";
-    if (isset($whyNot['dbError']))
-        $text .= $whyNot['dbError'] . " ";
-    if (isset($whyNot['permission']))
-        $text .= "You don’t have permission to $action $thisPaper. ";
-    if (isset($whyNot['withdrawn']))
-        $text .= ucfirst($thisPaper) . " has been withdrawn. ";
-    if (isset($whyNot['notWithdrawn']))
-        $text .= ucfirst($thisPaper) . " has not been withdrawn. ";
-    if (isset($whyNot['notSubmitted']))
-        $text .= ucfirst($thisPaper) . " was never officially submitted. ";
-    if (isset($whyNot['notAccepted']))
-        $text .= ucfirst($thisPaper) . " was not accepted for publication. ";
-    if (isset($whyNot["decided"]))
-        $text .= "The review process for $thisPaper has completed. ";
-    if (isset($whyNot['updateSubmitted']))
-        $text .= ucfirst($thisPaper) . " has already been submitted and can no longer be updated. ";
-    if (isset($whyNot['notUploaded']))
-        $text .= ucfirst($thisPaper) . " can’t be submitted because you haven’t yet uploaded the paper itself. Upload the paper and try again. ";
-    if (isset($whyNot['reviewNotSubmitted']))
-        $text .= "This review is not yet ready for others to see. ";
-    if (isset($whyNot['reviewNotComplete']))
-        $text .= "Your own review for $thisPaper is not complete, so you can’t view other people’s reviews. ";
-    if (isset($whyNot['responseNotReady']))
-        $text .= "The authors&rsquo; response for $thisPaper is not yet ready for reviewers to view. ";
-    if (isset($whyNot['reviewsOutstanding']))
-        $text .= "You will get access to the reviews once you complete <a href=\"" . hoturl("search", "q=&amp;t=r") . "\">your assigned reviews for other papers</a>.  If you can’t complete your reviews, please let the conference organizers know via the “Refuse review” links. ";
-    if (isset($whyNot['reviewNotAssigned']))
-        $text .= "You are not assigned to review $thisPaper. ";
-    if (isset($whyNot['deadline'])) {
-        $dname = $whyNot['deadline'];
-        if ($dname[0] == "s")
-            $start = $Conf->setting("sub_open", -1);
-        else if ($dname[0] == "p" || $dname[0] == "e")
-            $start = $Conf->setting("rev_open", -1);
-        else
-            $start = 1;
-        $end = $Conf->setting($dname, -1);
-        $now = time();
-        if ($start <= 0)
-            $text .= "You can’t $action $thisPaper yet. ";
-        else if ($start > 0 && $now < $start)
-            $text .= "You can’t $action $thisPaper until " . $Conf->printableTime($start, "span") . ". ";
-        else if ($end > 0 && $now > $end) {
-            if ($dname == "sub_reg")
-                $text .= "The paper registration deadline has passed. ";
-            else if ($dname == "sub_update")
-                $text .= "The deadline to update papers has passed. ";
-            else if ($dname == "sub_sub")
-                $text .= "The paper submission deadline has passed. ";
-            else if ($dname == "extrev_hard")
-                $text .= "The external review deadline has passed. ";
-            else if ($dname == "pcrev_hard")
-                $text .= "The PC review deadline has passed. ";
-            else
-                $text .= "The deadline to $action $thisPaper has passed. ";
-            $text .= "It was " . $Conf->printableTime($end, "span") . ". ";
-        } else if ($dname == "au_seerev") {
-            if ($Conf->setting("au_seerev") == AU_SEEREV_YES)
-                $text .= "Authors who are also reviewers can’t see reviews for their papers while they still have <a href='" . hoturl("search", "t=rout&amp;q=") . "'>incomplete reviews</a> of their own. ";
-            else
-                $text .= "Authors can’t view paper reviews at the moment. ";
-        } else
-            $text .= "You can’t $action $thisPaper at the moment. ";
-        $text .= "(<a class='nw' href='" . hoturl("deadlines") . "'>View deadlines</a>) ";
-    }
-    if (isset($whyNot['override']) && $whyNot['override'])
-        $text .= "“Override deadlines” can override this restriction. ";
-    if (isset($whyNot['blindSubmission']))
-        $text .= "Submission to this conference is blind. ";
-    if (isset($whyNot['author']))
-        $text .= "You aren’t a contact for $thisPaper. ";
-    if (isset($whyNot['conflict']))
-        $text .= "You have a conflict with $thisPaper. ";
-    if (isset($whyNot['externalReviewer']))
-        $text .= "External reviewers may not view other reviews for the papers they review. ";
-    if (isset($whyNot['differentReviewer']))
-        $text .= "You didn’t write this review, so you can’t change it. ";
-    if (isset($whyNot['reviewToken']))
-        $text .= "If you know a valid review token, enter it above to edit that review. ";
-    // finish it off
-    if (isset($whyNot['chairMode']))
-        $text .= "(<a class='nw' href=\"" . $Conf->selfurl(null, ["forceShow" => 1]) . "\">" . ucfirst($action) . " the paper anyway</a>) ";
-    if (isset($whyNot['forceShow']))
-        $text .= "(<a class='nw' href=\"". $Conf->selfurl(null, ["forceShow" => 1]) . "\">Override conflict</a>) ";
-    if ($text && $action == "view")
-        $text .= "Enter a paper number above, or <a href='" . hoturl("search", "q=") . "'>list the papers you can view</a>. ";
-    return rtrim($text);
-}
 
-
-if (!function_exists("random_bytes")) {
-    function random_bytes($length) {
-        $x = @file_get_contents("/dev/urandom", false, null, 0, $length);
-        if (($x === false || $x === "")
-            && function_exists("openssl_random_pseudo_bytes")) {
-            $x = openssl_random_pseudo_bytes($length, $strong);
-            $x = $strong ? $x : false;
-        }
-        return $x === "" ? false : $x;
-    }
-}
-
+// Aims to return a random password string with at least
+// `$length * 5` bits of entropy.
 function hotcrp_random_password($length = 14) {
-    $bytes = random_bytes($length + 10);
-    if ($bytes === false) {
-        $bytes = "";
-        while (strlen($bytes) < $length)
-            $bytes .= sha1(opt("conferenceKey") . pack("V", mt_rand()));
-    }
-
-    $l = "a e i o u y a e i o u y a e i o u y a e i o u y a e i o u y b c d g h j k l m n p r s t u v w trcrbrfrthdrchphwrstspswprslcl2 3 4 5 6 7 8 9 - @ _ + = ";
+    // XXX it is possible to correctly account for loss of entropy due
+    // to use of consonant pairs; I have only estimated
+    $bytes = random_bytes($length + 12);
+    $blen = strlen($bytes) * 8;
+    $bneed = $length * 5;
     $pw = "";
-    $nvow = 0;
-    for ($i = 0;
-         $i < strlen($bytes) &&
-             strlen($pw) < $length + max(0, ($nvow - 3) / 3);
-         ++$i) {
-        $x = ord($bytes[$i]) % (strlen($l) / 2);
-        if ($x < 30)
-            ++$nvow;
-        $pw .= rtrim(substr($l, 2 * $x, 2));
+    for ($b = 0; $bneed > 0 && $b + 8 <= $blen; ) {
+        $bidx = $b >> 3;
+        $codeword = (ord($bytes[$bidx]) << ($b & 7)) & 255;
+        if (($b & 7) > 0) {
+            $codeword |= ord($bytes[$bidx + 1]) >> (8 - ($b & 7));
+        }
+        if ($codeword < 0x60) {
+            $t = "aeiouy";
+            $pw .= $t[($codeword >> 4) & 0x7];
+            $bneed -= 4; // log2(3/8 * 1/6)
+            $b += 4;
+        } else if ($codeword < 0xC0) {
+            $t = "bcdghjklmnprstvw";
+            $pw .= $t[($codeword >> 1) & 0xF];
+            $bneed -= 5.415; // log2(3/8 * 1/16)
+            $b += 7;
+        } else if ($codeword < 0xE0) {
+            $t = "trcrbrfrthdrchphwrstspswprslclz";
+            $pw .= substr($t, $codeword & 0x1E, 2);
+            $bneed -= 6.415; // log2(1/8 * 1/16 * [fudge] ~1.5)
+            $b += 7;
+        } else {
+            $t = "23456789";
+            $pw .= $t[($codeword >> 2) & 0x7];
+            $bneed -= 6; // log2(1/8 * 1/8)
+            $b += 6;
+        }
     }
     return $pw;
 }
@@ -647,10 +605,12 @@ function hotcrp_random_password($length = 14) {
 function encode_token($x, $format = "") {
     $s = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     $t = "";
-    if (is_int($x))
+    if (is_int($x)) {
         $format = "V";
-    if ($format)
+    }
+    if ($format) {
         $x = pack($format, $x);
+    }
     $i = 0;
     $have = 0;
     $n = 0;
@@ -664,10 +624,11 @@ function encode_token($x, $format = "") {
         $n >>= 5;
         $have -= 5;
     }
-    if ($format == "V")
+    if ($format === "V") {
         return preg_replace('/(\AA|[^A])A*\z/', '$1', $t);
-    else
+    } else {
         return $t;
+    }
 }
 
 function decode_token($x, $format = "") {
@@ -677,15 +638,16 @@ function decode_token($x, $format = "") {
     $x = trim(strtoupper($x));
     for ($i = 0; $i < strlen($x); ++$i) {
         $o = ord($x[$i]);
-        if ($o >= 48 && $o <= 90 && ($out = ord($map[$o - 48])) >= 48)
+        if ($o >= 48 && $o <= 90 && ($out = ord($map[$o - 48])) >= 48) {
             $o = $out - 48;
-        else if ($o == 46 /*.*/ || $o == 34 /*"*/)
+        } else if ($o === 46 /*.*/ || $o === 34 /*"*/) {
             continue;
-        else
+        } else {
             return false;
+        }
         $n += $o << $have;
         $have += 5;
-        while ($have >= 8 || ($n && $i == strlen($x) - 1)) {
+        while ($have >= 8 || ($n && $i === strlen($x) - 1)) {
             $t .= chr($n & 255);
             $n >>= 8;
             $have -= 8;
@@ -694,10 +656,11 @@ function decode_token($x, $format = "") {
     if ($format == "V") {
         $x = unpack("Vx", $t . "\x00\x00\x00\x00\x00\x00\x00");
         return $x["x"];
-    } else if ($format)
+    } else if ($format) {
         return unpack($format, $t);
-    else
+    } else {
         return $t;
+    }
 }
 
 function git_refname_is_full_hash($refname) {
@@ -706,25 +669,8 @@ function git_refname_is_full_hash($refname) {
         && strtolower($refname) === $refname;
 }
 
-function git_commit_in_list($list, $hash) {
-    // XXX strtolower
-    if ((string) $hash === "") {
-        return false;
-    } else if (strlen($hash) === 40 || strlen($hash) === 64) {
-        return get($list, $hash);
-    }
-    $cx = null;
-    foreach ($list as $h => $commit) {
-        if (str_starts_with($h, $hash)) {
-            if ($cx) {
-                return false;
-            }
-            $cx = $commit;
-        }
-    }
-    return $cx;
-}
-
+/** @param null|int|float $g
+ * @return ?float */
 function round_grade($g) {
-    return round($g * 1000) / 1000;
+    return $g !== null ? round($g * 1000) / 1000 : null;
 }

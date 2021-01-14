@@ -14,7 +14,7 @@ if (isset($Qreq->fromlog)
     && ctype_digit($Qreq->fromlog)
     && $Me->privChair) {
     $result = $Conf->qe("select * from MailLog where mailId=" . $Qreq->fromlog);
-    if (($row = edb_orow($result))) {
+    if (($row = $result->fetch_object())) {
         foreach (array("recipients", "q", "t", "cc", "replyto", "subject", "emailBody") as $field)
             if (isset($row->$field) && !isset($Qreq[$field]))
                 $Qreq[$field] = $row->$field;
@@ -132,7 +132,7 @@ class MailSender {
         global $Conf, $Me, $Qreq;
         if ($this->started)
             return;
-        echo Ht::form_div(hoturl_post("mail"));
+        echo Ht::form(hoturl_post("mail"));
         foreach (array("recipients", "subject", "emailBody", "cc", "replyto", "q", "t", "plimit") as $x)
             if (isset($Qreq[$x]))
                 echo Ht::hidden($x, $Qreq[$x]);
@@ -152,19 +152,6 @@ class MailSender {
                 "<div class='fn2 warning'>Sending mail. <strong>Do not leave this page until it finishes rendering!</strong></div>",
                 "</div>";
         } else {
-            if (isset($Qreq->emailBody) && $Me->privChair
-                && (strpos($Qreq->emailBody, "%REVIEWS%")
-                    || strpos($Qreq->emailBody, "%COMMENTS%"))) {
-                if (!$Conf->timeAuthorViewReviews())
-                    echo "<div class='warning'>Although these mails contain reviews and/or comments, authors can’t see reviews or comments on the site. (<a href='", hoturl("settings", "group=dec"), "' class='nw'>Change this setting</a>)</div>\n";
-                else if (!$Conf->timeAuthorViewReviews(true))
-                    echo "<div class='warning'>Mails to users who have not completed their own reviews will not include reviews or comments. (<a href='", hoturl("settings", "group=dec"), "' class='nw'>Change the setting</a>)</div>\n";
-            }
-            if (isset($Qreq->emailBody) && $Me->privChair
-                && substr($recipients, 0, 4) == "dec:") {
-                if (!$Conf->timeAuthorViewDecision())
-                    echo "<div class='warning'>You appear to be sending an acceptance or rejection notification, but authors can’t see paper decisions on the site. (<a href='", hoturl("settings", "group=dec"), "' class='nw'>Change this setting</a>)</div>\n";
-            }
             echo "<div id='foldmail' class='foldc fold2c'>",
                 "<div class='fn fx2 warning'>In the process of preparing mail.  You will be able to send the prepared mail once this message disappears.<br /><span id='mailcount'></span></div>",
                 "<div id='mailwarnings'></div>",
@@ -181,7 +168,7 @@ class MailSender {
             echo '<div class="fn2 warning">Scroll down to send the prepared mail once the page finishes loading.</div>',
                 "</div>\n";
         }
-        echo Ht::unstash_script("fold('mail',0,2)");
+        echo Ht::unstash_script("\$pa.fold('mail',0,2)");
         $this->started = true;
     }
 
@@ -189,13 +176,13 @@ class MailSender {
         global $Conf;
         if (!$this->started)
             $this->echo_prologue();
-        $s = "\$\$('mailcount').innerHTML=\"" . round(100 * $nrows_done / max(1, $nrows_left)) . "% done.\";";
+        $s = "document.getElementById('mailcount').innerHTML=\"" . round(100 * $nrows_done / max(1, $nrows_left)) . "% done.\";";
         if (!$this->sending) {
             $m = plural($this->mcount, "mail") . ", "
                 . plural($this->mrecipients, "recipient");
             if (count($this->mpapers) != 0)
                 $m .= ", " . plural($this->mpapers, "paper");
-            $s .= "\$\$('mailinfo').innerHTML=\"<span class='barsep'>·</span>" . $m . "\";";
+            $s .= "document.getElementById('mailinfo').innerHTML=\"<span class='barsep'>·</span>" . $m . "\";";
         }
         if (!$this->sending && $this->groupable)
             $s .= "\$('.mail_groupable').show();";
@@ -254,9 +241,9 @@ class MailSender {
                 echo "<td class='mhx'></td>";
             else {
                 ++$this->cbcount;
-                echo '<td class="mhcb"><input type="checkbox" class="cb" name="', $cbkey,
+                echo '<td class="mhcb"><input type="checkbox" class="cb uic js-range-click" name="', $cbkey,
                     '" value="1" checked="checked" data-range-type="mhcb" id="psel', $this->cbcount,
-                    '" onclick="rangeclick(event,this)" /></td>';
+                    '" /></td>';
             }
             echo '<td class="mhnp">', $k, ":</td>",
                 '<td class="mhdp">', $vh, "</td></tr>\n";
@@ -339,10 +326,10 @@ class MailSender {
                                     "contactId" => array(), "fake" => 1);
         $last_prep = $fake_prep;
         $nrows_done = 0;
-        $nrows_left = edb_nrows($result);
+        $nrows_left = $result->num_rows;
         $nwarnings = 0;
         $preperrors = array();
-        while (($row = edb_orow($result))) {
+        while (($row = $result->fetch_object())) {
             ++$nrows_done;
 
             $contact = new Contact($row);
@@ -373,7 +360,7 @@ class MailSender {
                 $this->echo_prologue();
                 $nwarnings = $mailer->nwarnings();
                 echo "<div id='foldmailwarn$nwarnings' class='hidden'><div class='warning'>", join("<br />", $mailer->warnings()), "</div></div>";
-                echo Ht::unstash_script("\$\$('mailwarnings').innerHTML = \$\$('foldmailwarn$nwarnings').innerHTML;");
+                echo Ht::unstash_script("document.getElementById('mailwarnings').innerHTML = document.getElementById('foldmailwarn$nwarnings').innerHTML;");
             }
         }
 
@@ -386,8 +373,8 @@ class MailSender {
             return false;
         else if (!$this->sending)
             $this->echo_actions();
-        echo "</div></form>";
-        echo Ht::unstash_script("fold('mail', null);");
+        echo "</form>";
+        echo Ht::unstash_script("\$pa.fold('mail', null);");
         $Conf->footer();
         exit;
     }
@@ -399,7 +386,7 @@ class MailSender {
 $result = $Conf->q("select outcome, count(paperId), max(leadContactId), max(shepherdContactId) from Paper group by outcome");
 $noutcome = array();
 $anyLead = $anyShepherd = false;
-while (($row = edb_row($result))) {
+while (($row = $result->fetch_row())) {
     $noutcome[$row[0]] = $row[1];
     if ($row[2])
         $anyLead = true;
@@ -446,7 +433,7 @@ else
 if (isset($Qreq->replyto) && $Me->privChair)
     $Qreq->replyto = simplify_whitespace($Qreq->replyto);
 else
-    $Qreq->replyto = defval($Opt, "emailReplyTo", "");
+    $Qreq->replyto = $Opt["emailReplyTo"] ?? "";
 
 
 // Check or send
@@ -460,25 +447,6 @@ else if (($Qreq->check || $Qreq->group || $Qreq->ungroup)
     MailSender::check($recip);
 
 
-if ($Qreq->monreq) {
-    $plist = new PaperList(new PaperSearch($Me, array("t" => "req", "q" => "")), array("list" => true));
-    $ptext = $plist->text("reqrevs", array("header_links" => true));
-    if ($plist->count == 0)
-        $Conf->infoMsg("You have not requested any external reviews.  <a href='", hoturl("index"), "'>Return home</a>");
-    else {
-        echo "<h2>Requested reviews</h2>\n\n", $ptext, "<div class='info'>";
-        if ($plist->any->need_review)
-            echo "Some of your requested external reviewers have not completed their reviews.  To send them an email reminder, check the text below and then select &ldquo;Prepare mail.&rdquo;  You’ll get a chance to review the emails and select specific reviewers to remind.";
-        else
-            echo "All of your requested external reviewers have completed their reviews.  <a href='", hoturl("index"), "'>Return home</a>";
-        echo "</div>\n";
-    }
-    if (!$plist->any->need_review) {
-        $Conf->footer();
-        exit;
-    }
-}
-
 echo Ht::form_div(hoturl_post("mail", "check=1")),
     Ht::hidden_default_submit("default", 1), "
 
@@ -487,8 +455,9 @@ echo Ht::form_div(hoturl_post("mail", "check=1")),
 $tmpl = array();
 foreach ($mailTemplates as $k => $v) {
     if (isset($v["mailtool_name"])
-        && ($Me->privChair || defval($v, "mailtool_pc")))
-        $tmpl[$k] = defval($v, "mailtool_priority", 100);
+        && ($Me->privChair || ($v["mailtool_pc"] ?? false))) {
+        $tmpl[$k] = $v["mailtool_priority"] ?? 100;
+    }
 }
 asort($tmpl);
 foreach ($tmpl as $k => &$v) {
@@ -561,10 +530,10 @@ echo "  <tr><td class='mhnp'>Subject:</td><td class='mhdp'>",
 
 if ($Me->privChair) {
     $result = $Conf->qe("select * from MailLog order by mailId desc limit 18");
-    if (edb_nrows($result)) {
+    if ($result->num_rows) {
         echo "<div style='padding-top:12px'>",
             "<strong>Recent mails:</strong>\n";
-        while (($row = edb_orow($result))) {
+        while (($row = $result->fetch_object())) {
             echo "<div class='mhdd'><div style='position:relative;overflow:hidden'>",
                 "<div style='position:absolute;white-space:nowrap'><a class='q' href=\"", hoturl("mail", "fromlog=" . $row->mailId), "\">", htmlspecialchars($row->subject), " &ndash; <span class='dim'>", htmlspecialchars($row->emailBody), "</span></a></div>",
                 "<br /></div></div>\n";

@@ -4,40 +4,65 @@
 // See LICENSE for open-source distribution terms
 
 class APIData {
+    /** @var Conf */
     public $conf;
+    /** @var Contact */
     public $user;
+    /** @var ?Pset */
     public $pset;
+    /** @var ?Repository*/
     public $repo;
+    /** @var ?string */
     public $branch;
+    /** @var ?string */
     public $hash;
+    /** @var ?CommitRecord */
     public $commit;
+    /** @var int */
     public $at;
+
+    const ERRORCODE_RUNCONFLICT = 1001;
+
     function __construct(Contact $user, Pset $pset = null, Repository $repo = null) {
-        global $Now;
         $this->conf = $user->conf;
         $this->user = $user;
         $this->pset = $pset;
         $this->repo = $repo;
-        $this->at = $Now;
+        $this->at = Conf::$now;
     }
-    function prepare_grading_commit($info) {
-        if (!$this->pset->gitless_grades) {
-            if (!$this->repo)
-                return ["ok" => false, "error" => "Missing repository."];
+    /** @param PsetView $info
+     * @return ?array */
+    function prepare_commit($info) {
+        if ($this->repo) {
             $this->commit = $this->conf->check_api_hash($this->hash, $this);
-            if (!$this->commit)
-                return ["ok" => false, "error" => ($this->hash ? "Disconnected commit." : "Missing commit.")];
-            $info->force_set_hash($this->commit->hash);
+            if ($this->commit) {
+                $info->force_set_hash($this->commit->hash);
+                return null;
+            } else if ($this->hash) {
+                return ["ok" => false, "error" => "Disconnected commit."];
+            } else {
+                return ["ok" => false, "error" => "Missing commit."];
+            }
+        } else {
+            return ["ok" => false, "error" => "Missing repository."];
         }
-        return false;
+    }
+    /** @param PsetView $info
+     * @return ?array */
+    function prepare_grading_commit($info) {
+        return $this->pset->gitless_grades ? null : $this->prepare_commit($info);
     }
 }
 
 class Conf {
-    public $dblink = null;
+    /** @var ?mysqli */
+    public $dblink;
 
+    /** @var array<string,int> */
     private $settings;
+    /** @var array<string,null|string|object> */
     private $settingTexts;
+    /** @var int */
     public $sversion;
     private $_gsettings = [];
     private $_gsettings_data = [];
@@ -46,39 +71,76 @@ class Conf {
     public $dbname;
     public $dsn = null;
 
+    /** @var string */
     public $short_name;
+    /** @var string */
     public $long_name;
+    /** @var int */
+    public $default_format;
+    /** @var string */
     public $download_prefix;
     public $sort_by_last;
+    /** @var array<string,mixed> */
     public $opt;
-    public $opt_override = null;
+    /** @var array<string,mixed> */
+    public $opt_override;
+
+    /** @var object */
+    public $config;
+    /** @var ?string */
+    public $default_main_branch;
 
     public $validate_timeout;
     public $validate_overall_timeout;
-    public $default_format;
 
-    private $save_messages = true;
-    var $headerPrinted = false;
+    /** @var bool */
+    private $_header_printed = false;
+    /** @var ?list<array{string,string}> */
+    private $_save_msgs;
+    /** @var ?array<string,array<int,true>> */
     private $_save_logs = false;
+    /** @var false|null|array<string,mixed> */
     private $_session_list = false;
     public $_session_handler;
 
     private $usertimeId = 1;
 
+    /** @var array<int,Pset> */
     private $_psets = [];
+    /** @var array<string,Pset> */
     private $_psets_by_urlkey = [];
+    /** @var bool */
     private $_psets_sorted = false;
-    private $_group_weights = [];
-    private $_group_weight_defaults = [];
-    private $_grouped_psets;
-    private $_group_has_extra;
+    /** @var ?list<Pset> */
+    private $_psets_newest_first;
+    /** @var array<string,float> */
+    private $_category_weight = [];
+    /** @var array<string,bool> */
+    private $_category_weight_default = [];
+    /** @var array<string,list<Pset>> */
+    private $_psets_by_category;
+    /** @var array<string,bool> */
+    private $_category_has_extra;
 
+    /** @var ?list<FormulaConfig> */
+    private $_global_formulas;
+    /** @var array<string,FormulaConfig> */
+    private $_formulas_by_name;
+    /** @var list<GradeFormula> */
+    private $_canon_formulas = [];
+
+    /** @var bool */
     private $_date_format_initialized = false;
+    /** @var ?DateTimeZone */
+    private $_dtz;
     private $_pc_members_cache = null;
     private $_pc_tags_cache = null;
     private $_pc_members_and_admins_cache = null;
+    /** @var array<string,Repository> */
     private $_handout_repos = [];
+    /** @var array<int,array<string,CommitRecord>> */
     private $_handout_commits = [];
+    /** @var array<int,?CommitRecord> */
     private $_handout_latest_commit = [];
     private $_api_map = null;
     private $_repository_site_classes = null;
@@ -90,7 +152,15 @@ class Conf {
     const USERNAME_USERNAME = 16;
     private $_username_classes = 0;
 
-    static public $g = null;
+    /** @var false|null|SessionList */
+    private $_active_list = false;
+    /** @var ?array */
+    private $_siteinfo;
+
+    /** @var Conf */
+    static public $main;
+    /** @var int */
+    static public $now;
 
     static public $hoturl_defaults = null;
 
@@ -100,7 +170,7 @@ class Conf {
             list($this->dblink, $options["dbName"]) = Dbl::connect_dsn($this->dsn);
         }
         if (!isset($options["confid"])) {
-            $options["confid"] = get($options, "dbName");
+            $options["confid"] = $options["dbName"] ?? null;
         }
         $this->opt = $options;
         $this->dbname = $options["dbName"];
@@ -116,22 +186,32 @@ class Conf {
         }
     }
 
+    /** @param int $t */
+    static function set_current_time($t) {
+        global $Now;
+        $Now = Conf::$now = $t;
+    }
+
+    /** @param int $advance_past */
+    static function advance_current_time($advance_past) {
+        self::set_current_time(max(Conf::$now, $advance_past + 1));
+    }
+
 
     //
     // Initialization functions
     //
 
     function load_settings() {
-        global $Now;
-
         // load settings from database
         $this->settings = [];
         $this->settingTexts = [];
         foreach ($this->opt_override ? : [] as $k => $v) {
-            if ($v === null)
+            if ($v === null) {
                 unset($this->opt[$k]);
-            else
+            } else {
                 $this->opt[$k] = $v;
+            }
         }
         $this->opt_override = [];
 
@@ -140,11 +220,12 @@ class Conf {
         $result = $this->q_raw("select name, value, data from Settings");
         while ($result && ($row = $result->fetch_row())) {
             $this->settings[$row[0]] = (int) $row[1];
-            if ($row[2] !== null)
+            if ($row[2] !== null) {
                 $this->settingTexts[$row[0]] = $row[2];
+            }
             if (substr($row[0], 0, 4) == "opt.") {
                 $okey = substr($row[0], 4);
-                $this->opt_override[$okey] = get($this->opt, $okey);
+                $this->opt_override[$okey] = $this->opt[$okey] ?? null;
                 $this->opt[$okey] = ($row[2] === null ? (int) $row[1] : $row[2]);
             }
         }
@@ -152,7 +233,7 @@ class Conf {
 
         // update schema
         $this->sversion = $this->settings["allowPaperOption"];
-        if ($this->sversion < 132) {
+        if ($this->sversion < 146) {
             require_once("updateschema.php");
             $old_nerrors = Dbl::$nerrors;
             updateSchema($this);
@@ -164,38 +245,44 @@ class Conf {
             && $this->invalidate_caches()) {
             $this->qe_raw("delete from Settings where name='frombackup' and value=" . $this->settings["frombackup"]);
             unset($this->settings["frombackup"]);
-        } else
+        } else {
             $this->invalidate_caches(["rf" => true]);
+        }
 
         // update options
-        if (isset($this->opt["ldapLogin"]) && !$this->opt["ldapLogin"])
+        if (isset($this->opt["ldapLogin"]) && !$this->opt["ldapLogin"]) {
             unset($this->opt["ldapLogin"]);
-        if (isset($this->opt["httpAuthLogin"]) && !$this->opt["httpAuthLogin"])
+        }
+        if (isset($this->opt["httpAuthLogin"]) && !$this->opt["httpAuthLogin"]) {
             unset($this->opt["httpAuthLogin"]);
+        }
 
         // set conferenceKey
         if (!isset($this->opt["conferenceKey"])) {
             if (!isset($this->settingTexts["conf_key"])
-                && ($key = random_bytes(32)) !== false)
+                && ($key = random_bytes(32)) !== false) {
                 $this->save_setting("conf_key", 1, $key);
-            $this->opt["conferenceKey"] = get($this->settingTexts, "conf_key", "");
+            }
+            $this->opt["conferenceKey"] = $this->settingTexts["conf_key"] ?? "";
         }
 
         // set capability key
-        if (!get($this->settings, "cap_key")
-            && !get($this->opt, "disableCapabilities")
+        if (!($this->settings["cap_key"] ?? null)
+            && !($this->opt["disableCapabilities"] ?? null)
             && !(($key = random_bytes(16)) !== false
                  && ($key = base64_encode($key))
-                 && $this->save_setting("cap_key", 1, $key)))
+                 && $this->save_setting("cap_key", 1, $key))) {
             $this->opt["disableCapabilities"] = true;
+        }
 
         // GC old capabilities
-        if (defval($this->settings, "__capability_gc", 0) < $Now - 86400) {
-            foreach (array($this->dblink, Contact::contactdb()) as $db)
+        if (($this->settings["__capability_gc"] ?? 0) < Conf::$now - 86400) {
+            foreach (array($this->dblink, Contact::contactdb()) as $db) {
                 if ($db)
-                    Dbl::ql($db, "delete from Capability where timeExpires>0 and timeExpires<$Now");
-            $this->q_raw("insert into Settings (name, value) values ('__capability_gc', $Now) on duplicate key update value=values(value)");
-            $this->settings["__capability_gc"] = $Now;
+                    Dbl::ql($db, "delete from Capability where timeExpires>0 and timeExpires<" . Conf::$now);
+            }
+            $this->q_raw("insert into Settings (name, value) values ('__capability_gc', " . Conf::$now . ") on duplicate key update value=values(value)");
+            $this->settings["__capability_gc"] = Conf::$now;
         }
 
         $this->crosscheck_settings();
@@ -206,45 +293,48 @@ class Conf {
     }
 
     private function crosscheck_options() {
-        global $ConfSitePATH;
-
         // set longName, downloadPrefix, etc.
         $confid = $this->opt["confid"];
         if ((!isset($this->opt["longName"]) || $this->opt["longName"] == "")
             && (!isset($this->opt["shortName"]) || $this->opt["shortName"] == "")) {
             $this->opt["shortNameDefaulted"] = true;
             $this->opt["longName"] = $this->opt["shortName"] = $confid;
-        } else if (!isset($this->opt["longName"]) || $this->opt["longName"] == "")
+        } else if (!isset($this->opt["longName"]) || $this->opt["longName"] == "") {
             $this->opt["longName"] = $this->opt["shortName"];
-        else if (!isset($this->opt["shortName"]) || $this->opt["shortName"] == "")
+        } else if (!isset($this->opt["shortName"]) || $this->opt["shortName"] == "") {
             $this->opt["shortName"] = $this->opt["longName"];
-        if (!isset($this->opt["downloadPrefix"]) || $this->opt["downloadPrefix"] == "")
+        }
+        if (!isset($this->opt["downloadPrefix"]) || $this->opt["downloadPrefix"] == "") {
             $this->opt["downloadPrefix"] = $confid . "-";
+        }
         $this->short_name = $this->opt["shortName"];
         $this->long_name = $this->opt["longName"];
 
         // expand ${confid}, ${confshortname}
-        foreach (array("sessionName", "downloadPrefix", "conferenceSite",
-                       "paperSite", "defaultPaperSite", "contactName",
-                       "contactEmail", "docstore") as $k)
+        foreach (["sessionName", "downloadPrefix", "conferenceSite",
+                  "paperSite", "defaultPaperSite", "contactName",
+                  "contactEmail", "docstore"] as $k) {
             if (isset($this->opt[$k]) && is_string($this->opt[$k])
-                && strpos($this->opt[$k], "$") !== false) {
+                && strpos($this->opt[$k], "\$") !== false) {
                 $this->opt[$k] = preg_replace(',\$\{confid\}|\$confid\b,', $confid, $this->opt[$k]);
                 $this->opt[$k] = preg_replace(',\$\{confshortname\}|\$confshortname\b,', $this->short_name, $this->opt[$k]);
             }
+        }
         $this->download_prefix = $this->opt["downloadPrefix"];
 
-        foreach (array("emailFrom", "emailSender", "emailCc", "emailReplyTo") as $k)
+        foreach (["emailFrom", "emailSender", "emailCc", "emailReplyTo"] as $k) {
             if (isset($this->opt[$k]) && is_string($this->opt[$k])
-                && strpos($this->opt[$k], "$") !== false) {
-                $this->opt[$k] = preg_replace(',\$\{confid\}|\$confid\b,', $confid, $this->opt[$k]);
+                && strpos($this->opt[$k], "\$") !== false) {
+                $this->opt[$k] = preg_replace('/\$\{confid\}|\$confid\b/', $confid, $this->opt[$k]);
                 if (strpos($this->opt[$k], "confshortname") !== false) {
                     $v = rfc2822_words_quote($this->short_name);
-                    if ($v[0] === "\"" && strpos($this->opt[$k], "\"") !== false)
+                    if ($v[0] === "\"" && strpos($this->opt[$k], "\"") !== false) {
                         $v = substr($v, 1, strlen($v) - 2);
-                    $this->opt[$k] = preg_replace(',\$\{confshortname\}|\$confshortname\b,', $v, $this->opt[$k]);
+                    }
+                    $this->opt[$k] = preg_replace('/\$\{confshortname\}|\$confshortname\b/', $v, $this->opt[$k]);
                 }
             }
+        }
 
         // remove final slash from $Opt["paperSite"]
         if (!isset($this->opt["paperSite"]) || $this->opt["paperSite"] === "") {
@@ -258,131 +348,200 @@ class Conf {
         }
 
         // option name updates (backwards compatibility)
-        foreach (array("assetsURL" => "assetsUrl",
-                       "jqueryURL" => "jqueryUrl", "jqueryCDN" => "jqueryCdn",
-                       "disableCSV" => "disableCsv") as $kold => $knew)
-            if (isset($this->opt[$kold]) && !isset($this->opt[$knew]))
+        foreach (["assetsURL" => "assetsUrl",
+                  "jqueryURL" => "jqueryUrl", "jqueryCDN" => "jqueryCdn",
+                  "disableCSV" => "disableCsv"] as $kold => $knew) {
+            if (isset($this->opt[$kold]) && !isset($this->opt[$knew])) {
                 $this->opt[$knew] = $this->opt[$kold];
+            }
+        }
 
         // set assetsUrl and scriptAssetsUrl
-        if (!isset($this->opt["scriptAssetsUrl"]) && isset($_SERVER["HTTP_USER_AGENT"])
-            && strpos($_SERVER["HTTP_USER_AGENT"], "MSIE") !== false)
+        if (!isset($this->opt["scriptAssetsUrl"])
+            && isset($_SERVER["HTTP_USER_AGENT"])
+            && strpos($_SERVER["HTTP_USER_AGENT"], "MSIE") !== false) {
             $this->opt["scriptAssetsUrl"] = Navigation::siteurl();
-        if (!isset($this->opt["assetsUrl"]))
-            $this->opt["assetsUrl"] = Navigation::siteurl();
-        if ($this->opt["assetsUrl"] !== "" && !str_ends_with($this->opt["assetsUrl"], "/"))
+        }
+        if (!isset($this->opt["assetsUrl"])) {
+            $this->opt["assetsUrl"] = (string) Navigation::siteurl();
+        }
+        if ($this->opt["assetsUrl"] !== ""
+            && !str_ends_with($this->opt["assetsUrl"], "/")) {
             $this->opt["assetsUrl"] .= "/";
-        if (!isset($this->opt["scriptAssetsUrl"]))
+        }
+        if (!isset($this->opt["scriptAssetsUrl"])) {
             $this->opt["scriptAssetsUrl"] = $this->opt["assetsUrl"];
-        Ht::$img_base = $this->opt["assetsUrl"] . "images/";
-
-        // set docstore
-        if (get($this->opt, "docstore") === true)
-            $this->opt["docstore"] = "docs";
-        else if (!get($this->opt, "docstore") && get($this->opt, "filestore")) { // backwards compat
-            $this->opt["docstore"] = $this->opt["filestore"];
-            if ($this->opt["docstore"] === true)
-                $this->opt["docstore"] = "filestore";
-            $this->opt["docstoreSubdir"] = get($this->opt, "filestoreSubdir");
         }
-        if (get($this->opt, "docstore") && $this->opt["docstore"][0] !== "/")
-            $this->opt["docstore"] = $ConfSitePATH . "/" . $this->opt["docstore"];
-        $this->_docstore = false;
-        if (($fdir = get($this->opt, "docstore"))) {
-            $fpath = $fdir;
-            $use_subdir = get($this->opt, "docstoreSubdir");
-            if ($use_subdir && ($use_subdir === true || $use_subdir > 0))
-                $fpath .= "/%" . ($use_subdir === true ? 2 : $use_subdir) . "h";
-            $this->_docstore = [$fdir, $fpath . "/%h%x"];
-        }
-
-        // handle timezone
-        if (function_exists("date_default_timezone_set")) {
-            if (isset($this->opt["timezone"])) {
-                if (!date_default_timezone_set($this->opt["timezone"])) {
-                    self::msg_error("Timezone option “" . htmlspecialchars($this->opt["timezone"]) . "” is invalid; falling back to “America/New_York”.");
-                    date_default_timezone_set("America/New_York");
-                }
-            } else if (!ini_get("date.timezone") && !getenv("TZ"))
-                date_default_timezone_set("America/New_York");
-        }
-        $this->_date_format_initialized = false;
 
         // set safePasswords
-        if (!get($this->opt, "safePasswords")
-            || (is_int($this->opt["safePasswords"]) && $this->opt["safePasswords"] < 1))
+        if (!($this->opt["safePasswords"] ?? null)
+            || (is_int($this->opt["safePasswords"]) && $this->opt["safePasswords"] < 1)) {
             $this->opt["safePasswords"] = 0;
-        else if ($this->opt["safePasswords"] === true)
+        } else if ($this->opt["safePasswords"] === true) {
             $this->opt["safePasswords"] = 1;
-        if (!isset($this->opt["contactdb_safePasswords"]))
+        }
+        if (!isset($this->opt["contactdb_safePasswords"])) {
             $this->opt["contactdb_safePasswords"] = $this->opt["safePasswords"];
+        }
 
         // set validate timeouts
-        $this->validate_timeout = (float) get($this->opt, "validateTimeout", 5);
-        if ($this->validate_timeout <= 0)
+        $this->validate_timeout = (float) ($this->opt["validateTimeout"] ?? 5);
+        if ($this->validate_timeout <= 0) {
             $this->validate_timeout = 5;
-        $this->validate_overall_timeout = (float) get($this->opt, "validateOverallTimeout", 15);
-        if ($this->validate_overall_timeout <= 0)
+        }
+        $this->validate_overall_timeout = (float) ($this->opt["validateOverallTimeout"] ?? 15);
+        if ($this->validate_overall_timeout <= 0) {
             $this->validate_overall_timeout = 5;
+        }
 
         // repository site classes
         $this->_repository_site_classes = ["github"];
         if (isset($this->opt["repositorySites"])) {
             $x = $this->opt["repositorySites"];
-            if (is_array($x) || (is_string($x) && ($x = json_decode($x)) && is_array($x)))
+            if (is_array($x)
+                || (is_string($x) && ($x = json_decode($x)) && is_array($x))) {
                 $this->_repository_site_classes = $x;
+            }
         }
         $this->_username_classes = 0;
-        if (in_array("github", $this->_repository_site_classes))
+        if (in_array("github", $this->_repository_site_classes)) {
             $this->_username_classes |= self::USERNAME_GITHUB;
-        if (in_array("harvardseas", $this->_repository_site_classes))
+        }
+        if (in_array("harvardseas", $this->_repository_site_classes)) {
             $this->_username_classes |= self::USERNAME_HARVARDSEAS;
+        }
 
-        $sort_by_last = !!get($this->opt, "sortByLastName");
-        if (!$this->sort_by_last != !$sort_by_last)
+        $sort_by_last = !!($this->opt["sortByLastName"] ?? false);
+        if (!$this->sort_by_last != !$sort_by_last) {
             $this->_pc_members_cache = $this->_pc_members_and_admins_cache = null;
+        }
         $this->sort_by_last = $sort_by_last;
-        $this->default_format = (int) get($this->opt, "defaultFormat");
+        $this->default_format = (int) ($this->opt["defaultFormat"] ?? 0);
         $this->_api_map = null;
+        $this->_date_format_initialized = false;
+        $this->_dtz = null;
+    }
+
+    function crosscheck_globals() {
+        Ht::$img_base = $this->opt["assetsUrl"] . "images/";
+
+        if (isset($this->opt["timezone"])) {
+            if (!date_default_timezone_set($this->opt["timezone"])) {
+                self::msg_error("Timezone option “" . htmlspecialchars($this->opt["timezone"]) . "” is invalid; falling back to “America/New_York”.");
+                date_default_timezone_set("America/New_York");
+            }
+        } else if (!ini_get("date.timezone") && !getenv("TZ")) {
+            date_default_timezone_set("America/New_York");
+        }
+    }
+
+    static function set_main_instance(Conf $conf) {
+        global $Conf;
+        $Conf = Conf::$main = $conf;
+        $conf->crosscheck_globals();
+        if (!in_array("Conf::transfer_main_messages_to_session", Navigation::$redirect_callbacks ?? [], true)) {
+            Navigation::$redirect_callbacks[] = "Conf::transfer_main_messages_to_session";
+        }
     }
 
 
+    /** @param object $config */
+    function set_config($config) {
+        assert(isset($config->_defaults));
+        assert($this->config === null);
+        $this->config = $config;
+
+        // parse psets
+        foreach (get_object_vars($config) as $pk => $p) {
+            if (!str_starts_with($pk, "_")
+                && is_object($p)
+                && isset($p->psetid)) {
+                if (isset($p->group) && is_string($p->group)) {
+                    $g = "_defaults_" . $p->group;
+                    if (isset($config->$g)) {
+                        object_merge_recursive($p, $config->$g);
+                    }
+                }
+                object_merge_recursive($p, $config->_defaults);
+                try {
+                    $pset = new Pset($this, $pk, $p);
+                    $this->register_pset($pset);
+                } catch (PsetConfigException $exception) {
+                    $exception->key = $pk;
+                    throw $exception;
+                }
+            }
+        }
+
+        // extract defaults
+        if ($config->_defaults->main_branch ?? null) {
+            $this->set_default_main_branch($config->_defaults->main_branch);
+        }
+        if (!($config->_messagedefs ?? null)) {
+            $config->_messagedefs = (object) array();
+        }
+        if (!($config->_messagedefs->SYSTEAM ?? null)) {
+            $config->_messagedefs->SYSTEAM = "cs61-staff";
+        }
+    }
+
+    /** @param string $b */
+    function set_default_main_branch($b) {
+        $this->default_main_branch = $b;
+    }
+
+
+    /** @return bool */
     function has_setting($name) {
         return isset($this->settings[$name]);
     }
 
+    /** @param string $name
+     * @return ?int */
     function setting($name, $defval = null) {
-        return get($this->settings, $name, $defval);
+        return $this->settings[$name] ?? $defval;
     }
 
-    function setting_data($name, $defval = false) {
-        $x = get($this->settingTexts, $name, $defval);
-        if ($x && is_object($x) && isset($this->settingTexts[$name]))
+    /** @param string $name
+     * @return ?string */
+    function setting_data($name) {
+        $x = $this->settingTexts[$name] ?? null;
+        if ($x && is_object($x) && isset($this->settingTexts[$name])) {
             $x = $this->settingTexts[$name] = json_encode_db($x);
+        }
         return $x;
     }
 
-    function setting_json($name, $defval = false) {
-        $x = get($this->settingTexts, $name, $defval);
-        if ($x && is_string($x) && isset($this->settingTexts[$name])
-            && is_object(($x = json_decode($x))))
-            $this->settingTexts[$name] = $x;
-        return $x;
+    /** @param string $name
+     * @return ?object */
+    function setting_json($name) {
+        $x = $this->settingTexts[$name] ?? null;
+        if ($x && is_string($x) && is_object(($o = json_decode($x)))) {
+            $this->settingTexts[$name] = $o;
+            return $o;
+        } else {
+            return $x;
+        }
     }
 
-    private function __save_setting($name, $value, $data = null) {
+    /** @param string $name
+     * @param ?int $value */
+    function __save_setting($name, $value, $data = null) {
         $change = false;
         if ($value === null && $data === null) {
-            if ($this->qe("delete from Settings where name=?", $name)) {
+            $result = $this->qe("delete from Settings where name=?", $name);
+            if (!Dbl::is_error($result)) {
                 unset($this->settings[$name], $this->settingTexts[$name]);
                 $change = true;
             }
         } else {
             $value = (int) $value;
             $dval = $data;
-            if (is_array($dval) || is_object($dval))
+            if (is_array($dval) || is_object($dval)) {
                 $dval = json_encode_db($dval);
-            if ($this->qe("insert into Settings set name=?, value=?, data=? on duplicate key update value=values(value), data=values(data)", $name, $value, $dval)) {
+            }
+            $result = $this->qe("insert into Settings set name=?, value=?, data=? on duplicate key update value=values(value), data=values(data)", $name, $value, $dval);
+            if (!Dbl::is_error($result)) {
                 $this->settings[$name] = $value;
                 $this->settingTexts[$name] = $data;
                 $change = true;
@@ -390,25 +549,30 @@ class Conf {
         }
         if ($change && str_starts_with($name, "opt.")) {
             $oname = substr($name, 4);
-            if ($value === null && $data === null)
-                $this->opt[$oname] = get($this->opt_override, $oname);
-            else
+            if ($value === null && $data === null) {
+                $this->opt[$oname] = $this->opt_override[$oname] ?? null;
+            } else {
                 $this->opt[$oname] = $data === null ? $value : $data;
+            }
         }
         return $change;
     }
 
+    /** @param string $name
+     * @param ?int $value */
     function save_setting($name, $value, $data = null) {
         $change = $this->__save_setting($name, $value, $data);
         if ($change) {
             $this->crosscheck_settings();
-            if (str_starts_with($name, "opt."))
+            if (str_starts_with($name, "opt.")) {
                 $this->crosscheck_options();
+            }
         }
         return $change;
     }
 
 
+    /** @param ?string $name */
     function load_gsetting($name) {
         if ($name === null || $name === "") {
             $this->_gsettings_loaded = true;
@@ -416,8 +580,9 @@ class Conf {
             $where = "true";
             $qv = [];
         } else if (($dot = strpos($name, ".")) === false) {
-            if ($this->_gsettings_loaded !== true)
+            if ($this->_gsettings_loaded !== true) {
                 $this->_gsettings_loaded[$name] = true;
+            }
             $filter = function ($k) use ($name) {
                 return substr($k, 0, strlen($name)) !== $name
                     || ($k !== $name && $k[strlen($name)] !== ".");
@@ -425,8 +590,9 @@ class Conf {
             $where = "name=? or (name>=? and name<=?)";
             $qv = [$name, $name . ".", $name . "/"];
         } else {
-            if ($this->_gsettings_loaded !== true)
+            if ($this->_gsettings_loaded !== true) {
                 $this->_gsettings_loaded[$name] = true;
+            }
             $filter = function ($k) use ($name) {
                 return $k !== $name;
             };
@@ -443,6 +609,7 @@ class Conf {
         Dbl::free($result);
     }
 
+    /** @param ?string $name */
     function ensure_gsetting($name) {
         if ($this->_gsettings_loaded !== true
             && !isset($this->_gsettings_loaded[$name])
@@ -452,60 +619,78 @@ class Conf {
         }
     }
 
-    function gsetting($name, $defval = null) {
+    /** @param string $name
+     * @return ?int */
+    function gsetting($name) {
         $this->ensure_gsetting($name);
-        return isset($this->_gsettings[$name]) ? $this->_gsettings[$name] : $defval;
+        return $this->_gsettings[$name] ?? null;
     }
 
-    function gsetting_data($name, $defval = false) {
+    /** @param string $name
+     * @return ?string */
+    function gsetting_data($name) {
         $this->ensure_gsetting($name);
-        $x = get($this->_gsettings_data, $name, $defval);
-        if ($x && is_object($x) && isset($this->_gsettings_data[$name]))
+        $x = $this->_gsettings_data[$name] ?? null;
+        if ($x && is_object($x) && isset($this->_gsettings_data[$name])) {
             $x = $this->_gsettings_data[$name] = json_encode_db($x);
+        }
         return $x;
     }
 
-    function gsetting_json($name, $defval = false) {
+    /** @param string $name
+     * @return ?object */
+    function gsetting_json($name) {
         $this->ensure_gsetting($name);
-        $x = get($this->_gsettings_data, $name, $defval);
+        $x = $this->_gsettings_data[$name] ?? null;
         if ($x && is_string($x) && isset($this->_gsettings_data[$name])
-            && is_object(($x = json_decode($x))))
+            && is_object(($x = json_decode($x)))) {
             $this->_gsettings_data[$name] = $x;
+        }
         return $x;
     }
 
+    /** @param string $name
+     * @param ?int $value
+     * @param mixed $data
+     * @return bool */
     function save_gsetting($name, $value, $data = null) {
         $change = false;
         if ($value === null && $data === null) {
-            if ($this->qe("delete from GroupSettings where name=?", $name)) {
+            $result = $this->qe("delete from GroupSettings where name=?", $name);
+            if (!Dbl::is_error($result)) {
                 unset($this->_gsettings[$name], $this->_gsettings_data[$name]);
                 $change = true;
             }
         } else {
             $value = (int) $value;
             $dval = $data;
-            if (is_array($dval) || is_object($dval))
+            if (is_array($dval) || is_object($dval)) {
                 $dval = json_encode_db($dval);
+            }
             if (strlen($dval) > 32700) {
                 $odval = $dval;
                 $dval = null;
             } else {
                 $odval = null;
             }
-            if ($this->qe("insert into GroupSettings set name=?, value=?, data=?, dataOverflow=? on duplicate key update value=values(value), data=values(data), dataOverflow=values(dataOverflow)", $name, $value, $dval, $odval)) {
+            $result = $this->qe("insert into GroupSettings set name=?, value=?, data=?, dataOverflow=? on duplicate key update value=values(value), data=values(data), dataOverflow=values(dataOverflow)", $name, $value, $dval, $odval);
+            if (!Dbl::is_error($result)) {
                 $this->_gsettings[$name] = $value;
                 $this->_gsettings_data[$name] = isset($odval) ? $odval : $dval;
                 $change = true;
             }
         }
-        if ($this->_gsettings_loaded !== true)
+        if ($this->_gsettings_loaded !== true) {
             $this->_gsettings_loaded[$name] = true;
+        }
         return $change;
     }
 
 
-    function opt($name, $defval = null) {
-        return get($this->opt, $name, $defval);
+    /** @param string $name
+     * @return mixed */
+    function opt($name) {
+        return $this->opt[$name] ?? null;
     }
 
     function set_opt($name, $value) {
@@ -521,79 +706,92 @@ class Conf {
 
     // database
 
+    /** @return Dbl_Result */
     function q(/* $qstr, ... */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), 0);
     }
+    /** @return Dbl_Result */
     function q_raw(/* $qstr */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_RAW);
     }
+    /** @return Dbl_Result */
     function q_apply(/* $qstr, $args */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_APPLY);
     }
 
+    /** @return Dbl_Result */
     function ql(/* $qstr, ... */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_LOG);
     }
+    /** @return Dbl_Result */
     function ql_raw(/* $qstr */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_RAW | Dbl::F_LOG);
     }
+    /** @return Dbl_Result */
     function ql_apply(/* $qstr, $args */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_APPLY | Dbl::F_LOG);
     }
+    /** @return ?Dbl_Result */
+    function ql_ok(/* $qstr, ... */) {
+        $result = Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_LOG);
+        return Dbl::is_error($result) ? null : $result;
+    }
 
+    /** @return Dbl_Result */
     function qe(/* $qstr, ... */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR);
     }
+    /** @return Dbl_Result */
     function qe_raw(/* $qstr */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_RAW | Dbl::F_ERROR);
     }
+    /** @return Dbl_Result */
     function qe_apply(/* $qstr, $args */) {
         return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_APPLY | Dbl::F_ERROR);
     }
 
-    function qx(/* $qstr, ... */) {
-        return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ALLOWERROR);
-    }
-    function qx_raw(/* $qstr */) {
-        return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_RAW | Dbl::F_ALLOWERROR);
-    }
-    function qx_apply(/* $qstr, $args */) {
-        return Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_APPLY | Dbl::F_ALLOWERROR);
-    }
-
+    /** @return list<list<?string>> */
     function fetch_rows(/* $qstr, ... */) {
         return Dbl::fetch_rows(Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR));
     }
+    /** @return ?list<?string> */
+    function fetch_first_row(/* $qstr, ... */) {
+        return Dbl::fetch_first_row(Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR));
+    }
+    /** @return ?object */
+    function fetch_first_object(/* $qstr, ... */) {
+        return Dbl::fetch_first_object(Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR));
+    }
+    /** @return ?string */
     function fetch_value(/* $qstr, ... */) {
         return Dbl::fetch_value(Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR));
     }
+    /** @return ?int */
     function fetch_ivalue(/* $qstr, ... */) {
         return Dbl::fetch_ivalue(Dbl::do_query_on($this->dblink, func_get_args(), Dbl::F_ERROR));
     }
 
-    function db_error_html($getdb = true, $while = "") {
+    function db_error_html($getdb = true) {
         $text = "<p>Database error";
-        if ($while)
-            $text .= " $while";
-        if ($getdb)
+        if ($getdb) {
             $text .= ": " . htmlspecialchars($this->dblink->error);
+        }
         return $text . "</p>";
     }
 
-    function db_error_text($getdb = true, $while = "") {
+    function db_error_text($getdb = true) {
         $text = "Database error";
-        if ($while)
-            $text .= " $while";
-        if ($getdb)
+        if ($getdb) {
             $text .= ": " . $this->dblink->error;
+        }
         return $text;
     }
 
     function query_error_handler($dblink, $query) {
         $landmark = caller_landmark(1, "/^(?:Dbl::|Conf::q|call_user_func)/");
-        if (PHP_SAPI == "cli")
+        if (PHP_SAPI == "cli") {
             fwrite(STDERR, "$landmark: database error: $dblink->error in $query\n");
-        else {
+        } else {
             error_log("$landmark: database error: $dblink->error in $query");
             self::msg_error("<p>" . htmlspecialchars($landmark) . ": database error: " . htmlspecialchars($this->dblink->error) . " in " . Ht::pre_text_wrap($query) . "</p>");
         }
@@ -603,17 +801,11 @@ class Conf {
     // name
 
     function full_name() {
-        if ($this->short_name && $this->short_name != $this->long_name)
+        if ($this->short_name && $this->short_name != $this->long_name) {
             return $this->long_name . " (" . $this->short_name . ")";
-        else
+        } else {
             return $this->long_name;
-    }
-
-
-    // documents
-
-    function docstore() {
-        return $this->_docstore;
+        }
     }
 
 
@@ -708,7 +900,7 @@ class Conf {
         }
         $result = $this->qe_apply("select * from ContactInfo where " . join(" or ", $q), $qv);
         $users = [];
-        while (($user = Contact::fetch($result))) {
+        while (($user = Contact::fetch($result, $this))) {
             $users[] = $user;
         }
         Dbl::free($result);
@@ -731,7 +923,7 @@ class Conf {
 
     function user_id_by_email($email) {
         $result = $this->qe("select contactId from ContactInfo where email=?", trim($email));
-        $row = edb_row($result);
+        $row = $result->fetch_row();
         Dbl::free($result);
         return $row ? (int) $row[0] : false;
     }
@@ -891,168 +1083,266 @@ class Conf {
 
     // times
 
-    function printableInterval($amt) {
-        if ($amt > 259200 /* 3 days */) {
-            $amt = ceil($amt / 86400);
-            $what = "day";
-        } else if ($amt > 28800 /* 8 hours */) {
-            $amt = ceil($amt / 3600);
-            $what = "hour";
-        } else if ($amt > 3600 /* 1 hour */) {
-            $amt = ceil($amt / 1800) / 2;
-            $what = "hour";
-        } else if ($amt > 180) {
-            $amt = ceil($amt / 60);
-            $what = "minute";
-        } else if ($amt > 0) {
-            $amt = ceil($amt);
-            $what = "second";
-        } else
-            return "past";
-        return plural($amt, $what);
+    /** @return DateTimeZone */
+    function timezone() {
+        if ($this->_dtz === null) {
+            $this->_dtz = timezone_open($this->opt["timezone"] ?? date_default_timezone_get());
+        }
+        return $this->_dtz;
     }
-
-    private function _dateFormat($type) {
+    /** @param string $format
+     * @param int|float $t
+     * @return string */
+    private function _date_format($format, $t) {
+        if ($this !== self::$main && !$this->_dtz && isset($this->opt["timezone"])) {
+            $this->timezone();
+        }
+        if ($this->_dtz) {
+            $dt = new DateTime("@" . (int) $t);
+            $dt->setTimeZone($this->_dtz);
+            return $dt->format($format);
+        } else {
+            return date($format, $t);
+        }
+    }
+    /** @param string $type
+     * @param int|float $t
+     * @return string */
+    private function _date_unparse($type, $t) {
         if (!$this->_date_format_initialized) {
-            if (!isset($this->opt["time24hour"]) && isset($this->opt["time24Hour"]))
+            if (!isset($this->opt["time24hour"]) && isset($this->opt["time24Hour"])) {
                 $this->opt["time24hour"] = $this->opt["time24Hour"];
-            if (!isset($this->opt["dateFormatLong"]) && isset($this->opt["dateFormat"]))
+            }
+            if (!isset($this->opt["dateFormatLong"]) && isset($this->opt["dateFormat"])) {
                 $this->opt["dateFormatLong"] = $this->opt["dateFormat"];
-            if (!isset($this->opt["dateFormat"]))
-                $this->opt["dateFormat"] = get($this->opt, "time24hour") ? "j M Y H:i:s" : "j M Y g:i:sa";
-            if (!isset($this->opt["dateFormatLong"]))
+            }
+            if (!isset($this->opt["dateFormat"])) {
+                $this->opt["dateFormat"] = ($this->opt["time24hour"] ?? false) ? "j M Y H:i:s" : "j M Y g:i:sa";
+            }
+            if (!isset($this->opt["dateFormatLong"])) {
                 $this->opt["dateFormatLong"] = "l " . $this->opt["dateFormat"];
-            if (!isset($this->opt["dateFormatObscure"]))
+            }
+            if (!isset($this->opt["dateFormatObscure"])) {
                 $this->opt["dateFormatObscure"] = "j M Y";
-            if (!isset($this->opt["timestampFormat"]))
+            }
+            if (!isset($this->opt["timestampFormat"])) {
                 $this->opt["timestampFormat"] = $this->opt["dateFormat"];
-            if (!isset($this->opt["dateFormatSimplifier"]))
-                $this->opt["dateFormatSimplifier"] = get($this->opt, "time24hour") ? "/:00(?!:)/" : "/:00(?::00|)(?= ?[ap]m)/";
-            if (!isset($this->opt["dateFormatTimezone"]))
-                $this->opt["dateFormatTimezone"] = null;
+            }
+            if (!isset($this->opt["dateFormatSimplifier"])) {
+                $this->opt["dateFormatSimplifier"] = ($this->opt["time24hour"] ?? false) ? "/:00(?!:)/" : "/:00(?::00|)(?= ?[ap]m)/";
+            }
             $this->_date_format_initialized = true;
         }
-        if ($type == "timestamp")
-            return $this->opt["timestampFormat"];
-        else if ($type == "obscure")
-            return $this->opt["dateFormatObscure"];
-        else if ($type)
-            return $this->opt["dateFormatLong"];
-        else
-            return $this->opt["dateFormat"];
+        if ($type === "timestamp") {
+            $f = $this->opt["timestampFormat"];
+        } else if ($type === "obscure") {
+            $f = $this->opt["dateFormatObscure"];
+        } else if ($type === "long") {
+            $f = $this->opt["dateFormatLong"];
+        } else if ($type === "zone") {
+            $f = "T";
+        } else {
+            $f = $this->opt["dateFormat"];
+        }
+        return $this->_date_format($f, $t);
+    }
+    /** @param int|float $value
+     * @return string */
+    private function _unparse_timezone($value) {
+        $z = $this->opt["dateFormatTimezone"] ?? null;
+        if ($z === null) {
+            $z = $this->_date_unparse("zone", $value);
+            if ($z === "-12") {
+                $z = "AoE";
+            } else if ($z && ($z[0] === "+" || $z[0] === "-")) {
+                $z = "UTC" . $z;
+            }
+        }
+        return $z;
     }
 
+    /** @param int $value
+     * @param bool $include_zone
+     * @return string */
     function parseableTime($value, $include_zone) {
-        $f = $this->_dateFormat(false);
-        $d = date($f, $value);
-        if ($this->opt["dateFormatSimplifier"])
+        $d = $this->_date_unparse("short", $value);
+        if ($this->opt["dateFormatSimplifier"]) {
             $d = preg_replace($this->opt["dateFormatSimplifier"], "", $d);
-        if ($include_zone) {
-            if ($this->opt["dateFormatTimezone"] === null)
-                $d .= " " . date("T", $value);
-            else if ($this->opt["dateFormatTimezone"])
-                $d .= " " . $this->opt["dateFormatTimezone"];
+        }
+        if ($include_zone && ($z = $this->_unparse_timezone($value))) {
+            $d .= " $z";
         }
         return $d;
     }
+    /** @param string $d
+     * @param ?int $reference
+     * @return int|float|false */
     function parse_time($d, $reference = null) {
-        global $Now;
-        if ($reference === null)
-            $reference = $Now;
-        if (!isset($this->opt["dateFormatTimezoneRemover"])
-            && function_exists("timezone_abbreviations_list")) {
-            $mytz = date_default_timezone_get();
+        $reference = $reference ?? Conf::$now;
+        if (!isset($this->opt["dateFormatTimezoneRemover"])) {
             $x = array();
-            foreach (timezone_abbreviations_list() as $tzname => $tzinfo) {
-                foreach ($tzinfo as $tz)
-                    if ($tz["timezone_id"] == $mytz)
-                        $x[] = preg_quote($tzname);
+            if (function_exists("timezone_abbreviations_list")) {
+                $mytz = date_default_timezone_get();
+                foreach (timezone_abbreviations_list() as $tzname => $tzinfo) {
+                    foreach ($tzinfo as $tz) {
+                        if ($tz["timezone_id"] == $mytz) {
+                            $x[] = preg_quote($tzname);
+                        }
+                    }
+                }
             }
-            if (count($x) == 0)
-                $x[] = preg_quote(date("T", $reference));
+            if (empty($x)) {
+                $x[] = preg_quote($this->_unparse_timezone($reference));
+            }
             $this->opt["dateFormatTimezoneRemover"] =
                 "/(?:\\s|\\A)(?:" . join("|", $x) . ")(?:\\s|\\z)/i";
         }
-        if ($this->opt["dateFormatTimezoneRemover"])
+        if ($this->opt["dateFormatTimezoneRemover"]) {
             $d = preg_replace($this->opt["dateFormatTimezoneRemover"], " ", $d);
-        $d = preg_replace('/\butc([-+])/i', 'GMT$1', $d);
-        return strtotime($d, $reference);
+        }
+        if (preg_match('/\A(.*)\b(utc(?=[-+])|aoe(?=\s|\z))(.*)\z/i', $d, $m)) {
+            if (strcasecmp($m[2], "aoe") === 0) {
+                $d = strtotime($m[1] . "GMT-1200" . $m[3], $reference);
+                if ($d !== false
+                    && $d % 86400 == 43200
+                    && ($dx = strtotime($m[1] . " T23:59:59 GMT-1200" . $m[3], $reference)) === $d + 86399) {
+                    return $dx;
+                } else {
+                    return $d;
+                }
+            } else {
+                return strtotime($m[1] . "GMT" . $m[3], $reference);
+            }
+        } else {
+            return strtotime($d, $reference);
+        }
     }
 
-    function _printableTime($value, $type, $useradjust, $preadjust = null) {
-        if ($value <= 0)
+    // NB must return HTML-safe plaintext
+    /** @param int $timestamp */
+    private function _unparse_time($timestamp, $type) {
+        if ($timestamp <= 0) {
             return "N/A";
-        $t = date($this->_dateFormat($type), $value);
-        if ($this->opt["dateFormatSimplifier"])
-            $t = preg_replace($this->opt["dateFormatSimplifier"], "", $t);
-        if ($type !== "obscure") {
-            if ($this->opt["dateFormatTimezone"] === null)
-                $t .= " " . date("T", $value);
-            else if ($this->opt["dateFormatTimezone"])
-                $t .= " " . $this->opt["dateFormatTimezone"];
         }
-        if ($preadjust)
-            $t .= $preadjust;
-        if ($useradjust) {
-            $sp = strpos($useradjust, " ");
-            $t .= "<$useradjust class=\"usertime\" id=\"usertime$this->usertimeId\" style=\"display:none\"></" . ($sp ? substr($useradjust, 0, $sp) : $useradjust) . ">";
-            Ht::stash_script("setLocalTime('usertime$this->usertimeId',$value)");
-            ++$this->usertimeId;
+        $t = $this->_date_unparse($type, $timestamp);
+        if ($this->opt["dateFormatSimplifier"]) {
+            $t = preg_replace($this->opt["dateFormatSimplifier"], "", $t);
+        }
+        if ($type !== "obscure" && ($z = $this->_unparse_timezone($timestamp))) {
+            $t .= " $z";
         }
         return $t;
     }
-    function printableTime($value, $useradjust = false, $preadjust = null) {
-        return $this->_printableTime($value, true, $useradjust, $preadjust);
-    }
-    function printableTimestamp($value, $useradjust = false, $preadjust = null) {
-        return $this->_printableTime($value, "timestamp", $useradjust, $preadjust);
-    }
+    /** @param int|float|null $timestamp
+     * @return ?int */
     function obscure_time($timestamp) {
-        if ($timestamp !== null)
+        if ($timestamp !== null) {
             $timestamp = (int) ($timestamp + 0.5);
+        }
         if ($timestamp > 0) {
             $offset = 0;
-            if (($zone = timezone_open(date_default_timezone_get())))
+            if (($zone = $this->timezone())) {
                 $offset = $zone->getOffset(new DateTime("@$timestamp"));
+            }
             $timestamp += 43200 - ($timestamp + $offset) % 86400;
         }
         return $timestamp;
     }
-    function unparse_time_log($value) {
-        return date("d/M/Y:H:i:s O", $value);
+    /** @param int $timestamp */
+    function unparse_time_long($timestamp) {
+        return $this->_unparse_time($timestamp, "long");
     }
-
-    function printableTimeSetting($what, $useradjust = false, $preadjust = null) {
-        return $this->printableTime(defval($this->settings, $what, 0), $useradjust, $preadjust);
+    /** @param int $timestamp */
+    function unparse_time($timestamp) {
+        return $this->_unparse_time($timestamp, "timestamp");
     }
-    function printableDeadlineSetting($what, $useradjust = false, $preadjust = null) {
-        if (!isset($this->settings[$what]) || $this->settings[$what] <= 0)
-            return "No deadline";
-        else
-            return "Deadline: " . $this->printableTime($this->settings[$what], $useradjust, $preadjust);
+    /** @param int $timestamp */
+    function unparse_time_obscure($timestamp) {
+        return $this->_unparse_time($timestamp, "obscure");
+    }
+    /** @param int $timestamp */
+    function unparse_time_point($timestamp) {
+        return $this->_date_format("j M Y", $timestamp);
+    }
+    /** @param int $timestamp */
+    function unparse_time_log($timestamp) {
+        return $this->_date_format("d/M/Y:H:i:s O", $timestamp);
+    }
+    /** @param int $timestamp */
+    function unparse_time_iso($timestamp) {
+        return $this->_date_format("Ymd\\THis", $timestamp);
+    }
+    /** @param int $timestamp
+     * @param int $now */
+    function unparse_time_relative($timestamp, $now = 0, $format = 0) {
+        $d = abs($timestamp - ($now ? : Conf::$now));
+        if ($d >= 5227200) {
+            if (!($format & 1)) {
+                return ($format & 8 ? "on " : "") . $this->_date_unparse("obscure", $timestamp);
+            }
+            $unit = 5;
+        } else if ($d >= 259200) {
+            $unit = 4;
+        } else if ($d >= 28800) {
+            $unit = 3;
+        } else if ($d >= 3630) {
+            $unit = 2;
+        } else if ($d >= 180.5) {
+            $unit = 1;
+        } else if ($d >= 1) {
+            $unit = 0;
+        } else {
+            return "now";
+        }
+        $units = [1, 60, 1800, 3600, 86400, 604800];
+        $x = $units[$unit];
+        $d = ceil(($d - $x / 2) / $x);
+        if ($unit === 2) {
+            $d /= 2;
+        }
+        if ($format & 4) {
+            $d .= substr("smhhdw", $unit, 1);
+        } else {
+            $unit_names = ["second", "minute", "hour", "hour", "day", "week"];
+            $d .= " " . $unit_names[$unit] . ($d == 1 ? "" : "s");
+        }
+        if ($format & 2) {
+            return $d;
+        } else {
+            return $timestamp < ($now ? : Conf::$now) ? $d . " ago" : "in " . $d;
+        }
+    }
+    /** @param int $timestamp */
+    function unparse_usertime_span($timestamp) {
+        return '<span class="usertime hidden need-usertime" data-time="' . $timestamp . '"></span>';
+    }
+    /** @param string $name */
+    function unparse_setting_time($name) {
+        $t = $this->settings[$name] ?? 0;
+        return $this->unparse_time_long($t);
     }
 
     function settingsAfter($name) {
-        global $Now;
-        $t = get($this->settings, $name);
-        return $t !== null && $t > 0 && $t <= $Now;
+        $t = $this->settings[$name] ?? null;
+        return $t !== null && $t > 0 && $t <= Conf::$now;
     }
     function deadlinesAfter($name, $grace = null) {
-        global $Now;
-        $t = get($this->settings, $name);
-        if ($t !== null && $t > 0 && $grace && ($g = get($this->settings, $grace)))
+        $t = $this->settings[$name] ?? null;
+        if ($t !== null && $t > 0 && $grace && ($g = $this->settings[$grace] ?? null)) {
             $t += $g;
-        return $t !== null && $t > 0 && $t <= $Now;
+        }
+        return $t !== null && $t > 0 && $t <= Conf::$now;
     }
     function deadlinesBetween($name1, $name2, $grace = null) {
-        global $Now;
-        $t = get($this->settings, $name1);
-        if (($t === null || $t <= 0 || $t > $Now) && $name1)
+        $t = $this->settings[$name1] ?? null;
+        if (($t === null || $t <= 0 || $t > Conf::$now) && $name1) {
             return false;
-        $t = get($this->settings, $name2);
-        if ($t !== null && $t > 0 && $grace && ($g = get($this->settings, $grace)))
+        }
+        $t = $this->settings[$name2] ?? null;
+        if ($t !== null && $t > 0 && $grace && ($g = $this->settings[$grace] ?? null)) {
             $t += $g;
-        return $t === null || $t <= 0 || $t >= $Now;
+        }
+        return $t === null || $t <= 0 || $t >= Conf::$now;
     }
 
     function repository_site_classes() {
@@ -1064,7 +1354,6 @@ class Conf {
 
 
     function cacheableImage($name, $alt, $title = null, $class = null, $style = null) {
-        global $ConfSitePATH;
         $t = "<img src=\"" . Navigation::siteurl() . "images/$name\" alt=\"$alt\"";
         if ($title)
             $t .= " title=\"$title\"";
@@ -1080,19 +1369,27 @@ class Conf {
     // Message routines
     //
 
+    /** @param string|list<string> $text
+     * @param int|string $type */
     function msg($text, $type) {
         if (PHP_SAPI == "cli") {
-            if ($type === "xmerror" || $type === "merror")
+            if (is_array($text)) {
+                $text = join("\n", $text);
+            }
+            if ($type === "xmerror" || $type === "merror" || $type === 2) {
                 fwrite(STDERR, "$text\n");
-            else if ($type === "xwarning" || $type === "warning"
-                     || !defined("HOTCRP_TESTHARNESS"))
+            } else if ($type === "xwarning" || $type === "warning"
+                       || !defined("HOTCRP_TESTHARNESS")) {
                 fwrite(STDOUT, "$text\n");
-        } else if ($this->save_messages) {
-            ensure_session();
-            $_SESSION[$this->dsn]["msgs"][] = [$text, $type];
-        } else if ($type[0] == "x") {
-            echo Ht::xmsg($text, $type);
+            }
+        } else if (!$this->_header_printed) {
+            $this->_save_msgs[] = [$text, $type];
+        } else if (is_int($type) || $type[0] === "x") {
+            echo Ht::msg($text, $type);
         } else {
+            if (is_array($text)) {
+                $text = '<div class="multimessage">' . join("", array_map(function ($x) { return '<div class="mmm">' . $x . '</div>'; }, $text)) . '</div>';
+            }
             echo "<div class=\"$type\">$text</div>";
         }
     }
@@ -1102,7 +1399,7 @@ class Conf {
     }
 
     static public function msg_info($text, $minimal = false) {
-        self::$g->msg($text, $minimal ? "xinfo" : "info");
+        self::$main->msg($text, $minimal ? "xinfo" : "info");
     }
 
     function warnMsg($text, $minimal = false) {
@@ -1110,7 +1407,7 @@ class Conf {
     }
 
     static public function msg_warning($text, $minimal = false) {
-        self::$g->msg($text, $minimal ? "xwarning" : "warning");
+        self::$main->msg($text, $minimal ? "xwarning" : "warning");
     }
 
     function confirmMsg($text, $minimal = false) {
@@ -1118,23 +1415,25 @@ class Conf {
     }
 
     static public function msg_confirm($text, $minimal = false) {
-        self::$g->msg($text, $minimal ? "xconfirm" : "confirm");
+        self::$main->msg($text, $minimal ? "xconfirm" : "confirm");
     }
 
+    /** @return false */
     function errorMsg($text, $minimal = false) {
         $this->msg($text, $minimal ? "xmerror" : "merror");
         return false;
     }
 
+    /** @return false */
     static public function msg_error($text, $minimal = false) {
-        self::$g->msg($text, $minimal ? "xmerror" : "merror");
+        self::$main->msg($text, $minimal ? "xmerror" : "merror");
         return false;
     }
 
     static public function msg_debugt($text) {
         if (is_object($text) || is_array($text) || $text === null || $text === false || $text === true)
             $text = json_encode_browser($text);
-        self::$g->msg(Ht::pre_text_wrap($text), "merror");
+        self::$main->msg(Ht::pre_text_wrap($text), "merror");
         return false;
     }
 
@@ -1147,6 +1446,24 @@ class Conf {
     // Conference header, footer
     //
 
+    /** @return bool */
+    function has_active_list() {
+        return !!$this->_active_list;
+    }
+
+    /** @return ?SessionList */
+    function active_list() {
+        if ($this->_active_list === false) {
+            $this->_active_list = null;
+        }
+        return $this->_active_list;
+    }
+
+    function set_active_list(SessionList $list = null) {
+        assert($this->_active_list === false);
+        $this->_active_list = $list;
+    }
+
     function set_siteurl($base) {
         $old_siteurl = Navigation::siteurl();
         $base = Navigation::set_siteurl($base);
@@ -1154,8 +1471,9 @@ class Conf {
             $this->opt["assetsUrl"] = $base;
             Ht::$img_base = $this->opt["assetsUrl"] . "images/";
         }
-        if ($this->opt["scriptAssetsUrl"] === $old_siteurl)
+        if ($this->opt["scriptAssetsUrl"] === $old_siteurl) {
             $this->opt["scriptAssetsUrl"] = $base;
+        }
     }
 
     const HOTURL_RAW = 1;
@@ -1260,9 +1578,9 @@ class Conf {
                 $t = substr($t, $lexpect);
             }
         }
-        if (($flags & self::HOTURL_ABSOLUTE) || $this !== Conf::$g)
+        if (($flags & self::HOTURL_ABSOLUTE) || $this !== Conf::$main) {
             return $this->opt("paperSite") . "/" . $t;
-        else {
+        } else {
             $siteurl = $nav->site_path_relative;
             if ($need_site_path && $siteurl === "")
                 $siteurl = $nav->site_path;
@@ -1299,7 +1617,7 @@ class Conf {
 
         $x = [];
         foreach ($qreq as $k => $v) {
-            $ak = get(self::$selfurl_safe, $k);
+            $ak = self::$selfurl_safe[$k] ?? null;
             if ($ak === true)
                 $ak = $k;
             if ($ak
@@ -1318,138 +1636,163 @@ class Conf {
     }
 
 
-    function encoded_session_list() {
-        global $Now;
-        if ($this->_session_list === false) {
-            $this->_session_list = null;
-
-            $found = null;
-            foreach ($_COOKIE as $k => $v) {
-                if (($k === "hotlist-info" && $found === null)
-                    || (str_starts_with($k, "hotlist-info-")
-                        && strpos($k, "_") === false
-                        && ($found === null || strnatcmp($k, $found) > 0)))
-                    $found = $k;
+    function transfer_messages_to_session() {
+        if ($this->_save_msgs) {
+            ensure_session();
+            foreach ($this->_save_msgs as $m) {
+                $_SESSION[$this->dsn]["msgs"][] = $m;
             }
-
-            $found_text = null;
-            if ($found) {
-                $found_text = $_COOKIE[$found];
-                setcookie($found, "", $Now - 86400, Navigation::site_path());
-                for ($i = 1; isset($_COOKIE["{$found}_{$i}"]); ++$i) {
-                    $found_text .= $_COOKIE["{$found}_{$i}"];
-                    setcookie("{$found}_{$i}", "", $Now - 86400, Navigation::site_path());
-                }
-            }
-
-            if ($found_text) {
-                $j = json_decode($found_text);
-                if ($j === null)
-                    $j = json_decode(str_replace("'", ",", $found_text));
-                if (is_object($j) && isset($j->ids))
-                    $this->_session_list = $j;
-            }
+            $this->_save_msgs = null;
         }
-        return $this->_session_list;
     }
 
-    function session_list() {
-        if (($j = $this->encoded_session_list())) {
-            if (isset($j->ids)
-                && is_string($j->ids)
-                && preg_match('/\A[\s\d\']*\z/', $j->ids))
-                $j->ids = array_map(function ($x) { return (int) $x; },
-                                    preg_split('/[\s\']+/', $j->ids));
-            if (isset($j->psetids)
-                && is_string($j->psetids)
-                && preg_match('/\A[\s\d\']*\z/', $j->psetids))
-                $j->psetids = array_map(function ($x) { return (int) $x; },
-                                        preg_split('/[\s\']+/', $j->psetids));
-            if (isset($j->hashes)
-                && is_string($j->hashes)
-                && preg_match('/\A[\sA-Fa-fx\d\']*\z/', $j->hashes))
-                $j->hashes = preg_split('/[\s\']+/', $j->hashes);
+    static function transfer_main_messages_to_session() {
+        if (self::$main) {
+            self::$main->transfer_messages_to_session();
         }
-        return $j;
     }
 
 
-    function make_css_link($url, $media = null) {
-        global $ConfSitePATH;
+    /** @param non-empty-string $url
+     * @return string */
+    function make_css_link($url, $media = null, $integrity = null) {
+        if (str_starts_with($url, "<meta") || str_starts_with($url, "<link")) {
+            return $url;
+        }
         $t = '<link rel="stylesheet" type="text/css" href="';
-        if (str_starts_with($url, "stylesheets/")
-            || !preg_match(',\A(?:https?:|/),i', $url))
+        $absolute = preg_match('/\A(?:https:?:|\/)/i', $url);
+        if (!$absolute) {
             $t .= $this->opt["assetsUrl"];
-        $t .= $url;
-        if (($mtime = @filemtime("$ConfSitePATH/$url")) !== false)
+        }
+        $t .= htmlspecialchars($url);
+        if (!$absolute && ($mtime = @filemtime(SiteLoader::find($url))) !== false) {
             $t .= "?mtime=$mtime";
-        if ($media)
+        }
+        if ($media) {
             $t .= '" media="' . $media;
-        return $t . '" />';
+        }
+        $t .= '" crossorigin="anonymous';
+        if ($integrity) {
+            $t .= '" integrity="' . $integrity;
+        }
+        return $t . '">';
     }
 
+    /** @param non-empty-string $url
+     * @return string */
     function make_script_file($url, $no_strict = false, $integrity = null) {
-        global $ConfSitePATH;
         if (str_starts_with($url, "scripts/")) {
             $post = "";
-            if (($mtime = @filemtime("$ConfSitePATH/$url")) !== false)
+            if (($mtime = @filemtime(SiteLoader::find($url))) !== false) {
                 $post = "mtime=$mtime";
-            if (get($this->opt, "strictJavascript") && !$no_strict)
-                $url = $this->opt["scriptAssetsUrl"] . "cacheable.php?file=" . urlencode($url)
-                    . "&strictjs=1" . ($post ? "&$post" : "");
-            else
+            }
+            if (($this->opt["strictJavascript"] ?? false) && !$no_strict) {
+                $url = $this->opt["scriptAssetsUrl"] . "cacheable.php/"
+                    . str_replace("%2F", "/", urlencode($url))
+                    . "?strictjs=1" . ($post ? "&$post" : "");
+            } else {
                 $url = $this->opt["scriptAssetsUrl"] . $url . ($post ? "?$post" : "");
-            if ($this->opt["scriptAssetsUrl"] === Navigation::siteurl())
+            }
+            if ($this->opt["scriptAssetsUrl"] === Navigation::siteurl()) {
                 return Ht::script_file($url);
+            }
         }
         return Ht::script_file($url, ["crossorigin" => "anonymous", "integrity" => $integrity]);
     }
 
+    private function make_jquery_script_file($jqueryVersion) {
+        $integrity = null;
+        if ($this->opt("jqueryCdn")) {
+            if ($jqueryVersion === "3.5.1") {
+                $integrity = "sha384-ZvpUoO/+PpLXR1lu4jmpXWu80pZlYUAfxl5NsBMWOEPSjUn/6Z/hRTt8+pR6L4N2";
+            } else if ($jqueryVersion === "3.4.1") {
+                $integrity = "sha384-vk5WoKIaW/vJyUAd9n/wmopsmNhiy+L2Z+SBxGYnUkunIxVxAv/UtMOhba/xskxh";
+            } else if ($jqueryVersion === "3.3.1") {
+                $integrity = "sha256-FgpCb/KJQlLNfOu91ta32o/NMZxltwRo8QtmkMRdAu8=";
+            } else if ($jqueryVersion === "1.12.4") {
+                $integrity = "sha256-ZosEbRLbNQzLpnKIkEdrPv7lOy9C27hHQ+Xp8a4MxAQ=";
+            }
+            $jquery = "//code.jquery.com/jquery-{$jqueryVersion}.min.js";
+        } else {
+            $jquery = "scripts/jquery-{$jqueryVersion}.min.js";
+        }
+        '@phan-var non-empty-string $jquery';
+        return $this->make_script_file($jquery, true, $integrity);
+    }
+
     function add_stylesheet($file) {
-        $this->opt["stylesheets"] = mkarray($this->opt("stylesheets", []));
+        $this->opt["stylesheets"] = mkarray($this->opt("stylesheets") ?? []);
         $this->opt["stylesheets"][] = $file;
     }
 
     function add_javascript($file) {
-        $this->opt["javascripts"] = mkarray($this->opt("javascripts", []));
+        $this->opt["javascripts"] = mkarray($this->opt("javascripts") ?? []);
         $this->opt["javascripts"][] = $file;
     }
 
-    private function header_head($title) {
-        global $Me, $ConfSitePATH;
+    /** @param string $key */
+    function set_siteinfo($key, $value) {
+        if ($this->_header_printed) {
+            Ht::stash_script("siteinfo.$key = " . json_encode_browser($value) . ";");
+        } else {
+            $this->_siteinfo[$key] = $value;
+        }
+    }
+
+    function set_cookie($name, $value, $expires_at) {
+        $opt = [
+            "expires" => $expires_at, "path" => Navigation::site_path(),
+            "domain" => $this->opt("sessionDomain") ?? "",
+            "secure" => $this->opt("sessionSecure") ?? false
+        ];
+        if (($samesite = $this->opt("sessionSameSite") ?? "Lax")) {
+            $opt["samesite"] = $samesite;
+        }
+        if (!hotcrp_setcookie($name, $value, $opt)) {
+            error_log(debug_string_backtrace());
+        }
+    }
+
+    private function header_head($title, $id, $options) {
+        global $Me;
         echo "<!DOCTYPE html>
 <html lang=\"en\">
 <head>
 <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />
 <meta name=\"google\" content=\"notranslate\" />\n";
 
-        echo $this->opt("fontScript", "");
+        echo $this->opt("fontScript") ?? "";
 
         echo $this->make_css_link("stylesheets/style.css"), "\n";
+        echo $this->make_css_link("stylesheets/github.css"), "\n";
         if ($this->opt("mobileStylesheet")) {
             echo '<meta name="viewport" content="width=device-width, initial-scale=1">', "\n";
             echo $this->make_css_link("stylesheets/mobile.css", "screen and (max-width: 768px)"), "\n";
         }
-        foreach (mkarray($this->opt("stylesheets", [])) as $css)
+        echo $this->make_css_link("https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.min.css", null, "sha384-AfEj0r4/OFrOo5t7NnNe46zW/tFgW6x/bCJG8FqQCEo3+Aro6EYUG4+cU+KJWu/X");
+        foreach (mkarray($this->opt("stylesheets") ?? []) as $css) {
             echo $this->make_css_link($css), "\n";
+        }
 
         // favicon
         $favicon = $this->opt("favicon");
         if ($favicon) {
             if (strpos($favicon, "://") === false && $favicon[0] != "/") {
-                if ($this->opt["assetsUrl"] && substr($favicon, 0, 7) === "images/")
+                if ($this->opt["assetsUrl"] && substr($favicon, 0, 7) === "images/") {
                     $favicon = $this->opt["assetsUrl"] . $favicon;
-                else
+                } else {
                     $favicon = Navigation::siteurl() . $favicon;
+                }
             }
-            if (substr($favicon, -4) == ".png")
+            if (substr($favicon, -4) == ".png") {
                 echo "<link rel=\"icon\" type=\"image/png\" href=\"$favicon\" />\n";
-            else if (substr($favicon, -4) == ".ico")
+            } else if (substr($favicon, -4) == ".ico") {
                 echo "<link rel=\"shortcut icon\" href=\"$favicon\" />\n";
-            else if (substr($favicon, -4) == ".gif")
+            } else if (substr($favicon, -4) == ".gif") {
                 echo "<link rel=\"icon\" type=\"image/gif\" href=\"$favicon\" />\n";
-            else
+            } else {
                 echo "<link rel=\"icon\" href=\"$favicon\" />\n";
+            }
         }
 
         // title
@@ -1459,88 +1802,122 @@ class Conf {
             $title = preg_replace(",(?: |&nbsp;|\302\240)+,", " ", $title);
             $title = str_replace("&#x2215;", "-", $title);
         }
-        if ($title)
+        if ($title) {
             echo $title, " - ";
+        }
         echo htmlspecialchars($this->short_name), "</title>\n";
+
+        // <body>
+        echo "</head>\n<body", ($id ? " id=\"$id\"" : "");
+        if (($options["body_class"] ?? null) || $this->_active_list) {
+            echo ' class="', $options["body_class"] ?? "";
+            if ($this->_active_list) {
+                echo isset($options["body_class"]) ? " " : "", "has-hotlist";
+            }
+            echo '"';
+        }
+        if ($this->_active_list) {
+            echo ' data-hotlist="', htmlspecialchars($this->_active_list->listid), '"';
+        }
+        echo " onload=\"\$pa.onload()\" data-now=\"", Conf::$now, "\">\n";
 
         // jQuery
         $stash = Ht::unstash();
-        $jqueryVersion = get($this->opt, "jqueryVersion", "1.12.4");
-        $integrity = null;
-        if (isset($this->opt["jqueryUrl"]))
-            $jquery = $this->opt["jqueryUrl"];
-        else if ($this->opt("jqueryCdn")) {
-            $jquery = "//code.jquery.com/jquery-{$jqueryVersion}.min.js";
-            if ($jqueryVersion === "1.12.4")
-                $integrity = "sha256-ZosEbRLbNQzLpnKIkEdrPv7lOy9C27hHQ+Xp8a4MxAQ=";
-            else if ($jqueryVersion === "3.1.1")
-                $integrity = "sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=";
-        } else
-            $jquery = "scripts/jquery-{$jqueryVersion}.min.js";
-        Ht::stash_html($this->make_script_file($jquery, true, $integrity) . "\n");
-        if ($this->opt("jqueryMigrate"))
-            Ht::stash_html($this->make_script_file("//code.jquery.com/jquery-migrate-3.0.0.min.js", true));
+        if (isset($this->opt["jqueryUrl"])) {
+            Ht::stash_html($this->make_script_file($this->opt["jqueryUrl"], true) . "\n");
+        } else {
+            $jqueryVersion = $this->opt["jqueryVersion"] ?? "3.5.1";
+            if ($jqueryVersion[0] === "3") {
+                Ht::stash_html("<!--[if lt IE 9]>" . $this->make_jquery_script_file("1.12.4") . "<![endif]-->\n");
+                Ht::stash_html("<![if !IE|gte IE 9]>" . $this->make_jquery_script_file($jqueryVersion) . "<![endif]>\n");
+            } else {
+                Ht::stash_html($this->make_jquery_script_file($jqueryVersion) . "\n");
+            }
+        }
+        if ($this->opt("jqueryMigrate")) {
+            Ht::stash_html($this->make_script_file("//code.jquery.com/jquery-migrate-3.0.0.js", true));
+        }
         Ht::stash_html($this->make_script_file("scripts/jquery.color-2.1.2.min.js", true) . "\n");
         Ht::stash_html($this->make_script_file("scripts/markdown-it.min.js", true) . "\n");
-        foreach (mkarray($this->opt("javascripts", [])) as $scriptfile)
+        Ht::stash_html($this->make_script_file("scripts/highlight.min.js", true) . "\n");
+        Ht::stash_html($this->make_script_file("scripts/markdown-it-katexx.min.js", true) . "\n");
+        Ht::stash_html('<script src="https://cdn.jsdelivr.net/npm/katex@0.12.0/dist/katex.min.js" integrity="sha384-g7c+Jr9ZivxKLnZTDUhnkOnsh30B4H0rpLUpJ4jAIKs4fnJI+sEnkvrMWph2EDg4" crossorigin="anonymous"></script>');
+        foreach (mkarray($this->opt("javascripts") ?? []) as $scriptfile) {
             Ht::stash_html($this->make_script_file($scriptfile, true) . "\n");
-
-        // Javascript settings to set before script.js
-        $nav = Navigation::get();
-        Ht::stash_script("siteurl=" . json_encode_browser($nav->site_path_relative)
-            . ";siteurl_base_path=" . json_encode_browser($nav->base_path)
-            . ";siteurl_suffix=\"" . $nav->php_suffix . "\"");
-        if (session_id() !== "")
-            Ht::stash_script("siteurl_postvalue=\"" . post_value() . "\"");
-        if (($list = $this->encoded_session_list()))
-            Ht::stash_script("hotcrp_list=" . json_encode_browser($list) . ";");
-        if (self::$hoturl_defaults) {
-            $urldefaults = [];
-            foreach (self::$hoturl_defaults as $k => $v) {
-                $urldefaults[$k] = urldecode($v);
-            }
-            Ht::stash_script("siteurl_defaults=" . json_encode_browser($urldefaults) . ";");
         }
-        Ht::stash_script("assetsurl=" . json_encode_browser($this->opt["assetsUrl"]) . ";");
-        $huser = (object) array();
-        if ($Me && $Me->email)
-            $huser->email = $Me->email;
-        if ($Me && $Me->is_pclike())
-            $huser->is_pclike = true;
-        Ht::stash_script("hotcrp_user=" . json_encode_browser($huser));
 
-        // script.js
-        if (!$this->opt("noDefaultScript"))
-            Ht::stash_html($this->make_script_file("scripts/script.js") . "\n");
+        // Javascript settings to set before pa.js
+        $nav = Navigation::get();
+        $siteinfo = [
+            "site_relative" => $nav->site_path_relative,
+            "base" => $nav->base_path,
+            "suffix" => $nav->php_suffix,
+            "assets" => $this->opt["assetsUrl"],
+            "cookie_params" => "",
+            "user" => []
+        ];
+        if (session_id() !== "") {
+            $siteinfo["postvalue"] = post_value();
+        }
+        if (($x = $this->opt("sessionDomain"))) {
+            $siteinfo["cookie_params"] .= "; Domain=" . $x;
+        }
+        if ($this->opt("sessionSecure")) {
+            $siteinfo["cookie_params"] .= "; Secure";
+        }
+        if (($x = $this->opt("sessionSameSite") ?? "Lax")) {
+            $siteinfo["cookie_params"] .= "; SameSite=" . $x;
+        }
+        if (self::$hoturl_defaults) {
+            $siteinfo["defaults"] = [];
+            foreach (self::$hoturl_defaults as $k => $v) {
+                $siteinfo["defaults"][$k] = urldecode($v);
+            }
+        }
+        if ($Me && $Me->email) {
+            $siteinfo["user"]["email"] = $Me->email;
+        }
+        if ($Me && $Me->is_pclike()) {
+            $siteinfo["user"]["is_pclike"] = true;
+        }
+        foreach ($this->_siteinfo ?? [] as $k => $v) {
+            $siteinfo[$k] = $v;
+        }
+        $this->_siteinfo = null;
+        Ht::stash_script("window.siteinfo=" . json_encode_browser($siteinfo) . ";");
+
+        // pa.js
+        if (!$this->opt("noDefaultScript")) {
+            Ht::stash_html($this->make_script_file("scripts/pa.min.js") . "\n");
+        }
 
         // other scripts
-        foreach ($this->opt("scripts", []) as $file)
+        foreach ($this->opt("scripts") ?? [] as $file) {
             Ht::stash_html($this->make_script_file($file) . "\n");
-
-        echo $stash, Ht::unstash(), "</head>\n";
-    }
-
-    function header($title, $id = "", $actionBar = null, $showTitle = true) {
-        global $ConfSitePATH, $Me, $Now;
-        if ($this->headerPrinted)
-            return;
-
-        // <head>
-        if ($title === "Home")
-            $title = "";
-        $this->header_head($title);
-        $this->encoded_session_list(); // clear cookie if set
-
-        // <body>
-        echo "<body", ($id ? " id=\"$id\"" : ""), " onload=\"hotcrp_load()\" data-now=\"$Now\">\n";
+        }
 
         // initial load (JS's timezone offsets are negative of PHP's)
-        Ht::stash_script("hotcrp_load.time(" . (-date("Z", $Now) / 60) . "," . ($this->opt("time24hour") ? 1 : 0) . ")");
+        Ht::stash_script("\$pa.onload.time(" . (-date("Z", Conf::$now) / 60) . "," . ($this->opt("time24hour") ? 1 : 0) . ")");
+
+        echo $stash, Ht::unstash();
+    }
+
+    function header($title, $id = "", $options = []) {
+        global $Me;
+        if ($this->_header_printed) {
+            return;
+        }
+
+        // <head>
+        if ($title === "Home") {
+            $title = "";
+        }
+        $this->header_head($title, $id, $options);
 
         echo "<div id='prebody'>\n";
 
         echo "<div id='header'>\n<div id='header_left_conf'><h1>";
-        if ($title && $showTitle && ($title == "Home" || $title == "Sign in"))
+        if ($title && ($title == "Home" || $title == "Sign in"))
             echo "<a class='qq' href='", hoturl("index"), "' title='Home'>", htmlspecialchars($this->short_name), "</a>";
         else
             echo "<a class='uu' href='", hoturl("index"), "' title='Home'>", htmlspecialchars($this->short_name), "</a></h1></div><div id='header_left_page'><h1>", $title;
@@ -1562,7 +1939,7 @@ class Conf {
             }
 
             // "act as" link
-            if (($actas = get($_SESSION, "last_actas"))
+            if (($actas = $_SESSION["last_actas"] ?? null)
                 && (($Me->privChair && strcasecmp($actas, $Me->email) !== 0)
                     || Contact::$true_user)) {
                 // Link becomes true user if not currently chair.
@@ -1588,37 +1965,60 @@ class Conf {
 
         echo "  <hr class=\"c\" />\n";
 
-        echo $actionBar;
-
+        $this->_header_printed = true;
         echo "</div>\n<div id=\"initialmsgs\">\n";
-        if (($x = $this->opt("maintenance")))
-            echo "<div class=\"merror\"><strong>The site is down for maintenance.</strong> ", (is_string($x) ? $x : "Please check back later."), "</div>";
-        $this->save_messages = false;
+        if (($x = $this->opt("maintenance"))) {
+            echo Ht::msg(is_string($x) ? $x : "<strong>The site is down for maintenance.</strong> Please check back later.", 2);
+        }
         if (($msgs = $this->session("msgs"))
             && !empty($msgs)) {
             $this->save_session("msgs", null);
-            foreach ($msgs as $m)
+            foreach ($msgs as $m) {
                 $this->msg($m[0], $m[1]);
+            }
             echo "<div id=\"initialmsgspacer\"></div>";
+        }
+        if ($this->_save_msgs) {
+            foreach ($this->_save_msgs as $m) {
+                $this->msg($m[0], $m[1]);
+            }
+            $this->_save_msgs = null;
+        }
+        if (isset($_COOKIE["hotcrpmessage"])) {
+            $message = json_decode(rawurldecode($_COOKIE["hotcrpmessage"]));
+            if (is_array($message)) {
+                if (count($message) === 2
+                    && (is_int($message[1]) || $message[1] === "confirm")) {
+                    $message = [$message];
+                }
+                foreach ($message as $m) {
+                    if (is_array($m)
+                        && (is_int($m[1]) || $m[1] === "confirm")
+                        && ($t = CleanHTML::basic_clean_all($m[0])) !== false) {
+                        $this->msg($t, $m[1]);
+                    }
+                }
+                $this->set_cookie("hotcrpmessage", "", Conf::$now - 3600);
+            }
         }
         echo "</div>\n";
 
-        $this->headerPrinted = true;
         echo "</div>\n<div class='body'>\n";
     }
 
     function footer() {
-        global $Me, $ConfSitePATH;
+        global $Me;
         echo "</div>\n", // class='body'
             "<div id='footer'>\n";
-        $footy = $this->opt("extraFooter", "");
-        if (false)
+        $footy = $this->opt("extraFooter") ?? "";
+        if (false) {
             $footy .= "<a href='http://read.seas.harvard.edu/~kohler/hotcrp/'>HotCRP</a> Conference Management Software";
+        }
         if (!$this->opt("noFooterVersion")) {
             if ($Me && $Me->privChair) {
-                if (is_dir("$ConfSitePATH/.git")) {
+                if (is_dir(SiteLoader::$root . "/.git")) {
                     $args = array();
-                    exec("export GIT_DIR=" . escapeshellarg($ConfSitePATH) . "/.git; git rev-parse HEAD 2>/dev/null", $args);
+                    exec("export GIT_DIR=" . escapeshellarg(SiteLoader::$root) . "/.git; git rev-parse HEAD 2>/dev/null", $args);
                     if (count($args) == 2 && $args[0] != $args[1])
                         $footy .= " [" . substr($args[0], 0, 7) . "...]";
                 }
@@ -1631,37 +2031,43 @@ class Conf {
     }
 
     function stash_hotcrp_pc(Contact $user) {
-        if (!Ht::mark_stash("hotcrp_pc"))
+        if (!Ht::mark_stash("hotcrp_pc")) {
             return;
+        }
         $hpcj = $list = [];
         foreach ($this->pc_members_and_admins() as $pcm) {
             $hpcj[$pcm->contactId] = $j = (object) ["name" => Text::name_html($pcm), "email" => $pcm->email];
             if ($pcm->lastName) {
                 $r = Text::analyze_name($pcm);
-                if (strlen($r->lastName) !== strlen($r->name))
+                if (strlen($r->lastName) !== strlen($r->name)) {
                     $j->lastpos = strlen(htmlspecialchars($r->firstName)) + 1;
-                if ($r->nameAmbiguous && $r->name && $r->email)
+                }
+                if ($r->nameAmbiguous && $r->name && $r->email) {
                     $j->emailpos = strlen(htmlspecialchars($r->name)) + 1;
-            }
-            if (!$pcm->nameAmbiguous && ($pcm->nickname || $pcm->firstName)) {
-                if ($pcm->nicknameAmbiguous)
-                    $j->nicklen = strlen(htmlspecialchars($r->name));
-                else {
-                    $nick = htmlspecialchars($pcm->nickname ? : $pcm->firstName);
-                    if (str_starts_with($j->name, $nick))
-                        $j->nicklen = strlen($nick);
-                    else
-                        $j->nick = $nick;
                 }
             }
-            if (!($pcm->roles & Contact::ROLE_PC))
+            if (!$pcm->nameAmbiguous && ($pcm->nickname || $pcm->firstName)) {
+                if ($pcm->nicknameAmbiguous) {
+                    $j->nicklen = strlen(htmlspecialchars($r->name));
+                } else {
+                    $nick = htmlspecialchars($pcm->nickname ? : $pcm->firstName);
+                    if (str_starts_with($j->name, $nick)) {
+                        $j->nicklen = strlen($nick);
+                    } else {
+                        $j->nick = $nick;
+                    }
+                }
+            }
+            if (!($pcm->roles & Contact::ROLE_PC)) {
                 $j->admin_only = true;
+            }
             $list[] = $pcm->contactId;
         }
         $hpcj["__order__"] = $list;
-        if ($this->sort_by_last)
+        if ($this->sort_by_last) {
             $hpcj["__sort__"] = "last";
-        Ht::stash_script("hotcrp_pc=" . json_encode_browser($hpcj) . ";");
+        }
+        Ht::stash_script("window.siteinfo.pc=" . json_encode_browser($hpcj) . ";");
     }
 
     function output_ajax($values = null, $div = false) {
@@ -1680,7 +2086,7 @@ class Conf {
                     && !isset($values["error"]))
                     $values["error"] = $msg[1];
                 if ($div)
-                    $t .= Ht::xmsg($msg[0], $msg[1]);
+                    $t .= Ht::msg($msg[0], $msg[1]);
                 else
                     $t .= "<span class=\"$msg[0]\">$msg[1]</span>";
             }
@@ -1771,19 +2177,21 @@ class Conf {
             throw new Exception("pset urlkey `{$pset->urlkey}` reused");
         }
         $this->_psets_by_urlkey[$pset->urlkey] = $pset;
-        if (!$pset->disabled && $pset->group) {
-            if (!isset($this->_group_weights[$pset->group])) {
-                $this->_group_weights[$pset->group] = $pset->group_weight;
-                $this->_group_weight_defaults[$pset->group] = $pset->group_weight_default;
-            } else if ($this->_group_weight_defaults[$pset->group] === $pset->group_weight_default) {
-                $this->_group_weights[$pset->group] += $pset->group_weight;
+        if (!$pset->disabled && $pset->category) {
+            if (!isset($this->_category_weight[$pset->category])) {
+                $this->_category_weight[$pset->category] = $pset->weight;
+                $this->_category_weight_default[$pset->category] = $pset->weight_default;
+            } else if ($this->_category_weight_default[$pset->category] === $pset->weight_default) {
+                $this->_category_weight[$pset->category] += $pset->weight;
             } else {
-                throw new Exception("pset group `{$pset->group}` has not all group weights set");
+                throw new Exception("pset category `{$pset->category}` has not all group weights set");
             }
         }
         $this->_psets_sorted = false;
+        $this->_psets_newest_first = null;
     }
 
+    /** @return array<int,Pset> */
     function psets() {
         if (!$this->_psets_sorted) {
             uasort($this->_psets, "Pset::compare");
@@ -1792,16 +2200,25 @@ class Conf {
         return $this->_psets;
     }
 
+    /** @return list<Pset> */
     function psets_newest_first() {
-        return array_reverse($this->psets(), true);
+        if ($this->_psets_newest_first === null) {
+            $this->_psets_newest_first = array_values($this->_psets);
+            uasort($this->_psets_newest_first, "Pset::compare_newest_first");
+        }
+        return $this->_psets_newest_first;
     }
 
+    /** @param int $id
+     * @return ?Pset */
     function pset_by_id($id) {
-        return get($this->_psets, $id);
+        return $this->_psets[$id] ?? null;
     }
 
+    /** @param string $key
+     * @return ?Pset */
     function pset_by_key($key) {
-        if (($p = get($this->_psets_by_urlkey, $key))) {
+        if (($p = $this->_psets_by_urlkey[$key] ?? null)) {
             return $p;
         }
         foreach ($this->_psets as $p) {
@@ -1811,9 +2228,14 @@ class Conf {
         return null;
     }
 
+    /** @param string $key
+     * @return ?Pset */
     function pset_by_key_or_title($key) {
-        if (($p = get($this->_psets_by_urlkey, $key))) {
+        if (($p = $this->_psets_by_urlkey[$key] ?? null)) {
             return $p;
+        } else if (str_starts_with($key, "pset")
+                   && ctype_digit(substr($key, 4))) {
+            return $this->_psets[(int) substr($key, 4)] ?? null;
         }
         $tm = null;
         foreach ($this->_psets as $p) {
@@ -1826,24 +2248,27 @@ class Conf {
         return $tm;
     }
 
-    function group_weight($group) {
-        return get($this->_group_weights, $group, 0.0);
+    /** @param string $group
+     * @return float */
+    function category_weight($group) {
+        return $this->_category_weight[$group] ?? 0.0;
     }
 
-    function pset_groups() {
-        if ($this->_grouped_psets === null) {
-            $this->_grouped_psets = [];
-            $this->_group_has_extra = [];
+    /** @return array<string,list<Pset>> */
+    function psets_by_category() {
+        if ($this->_psets_by_category === null) {
+            $this->_psets_by_category = [];
+            $this->_category_has_extra = [];
             foreach ($this->psets() as $pset) {
                 if (!$pset->disabled) {
-                    $group = $pset->group ? : "";
-                    $this->_grouped_psets[$group][] = $pset;
+                    $category = $pset->category ?? "";
+                    $this->_psets_by_category[$category][] = $pset;
                     if ($pset->has_extra) {
-                        $this->_group_has_extra[$group] = true;
+                        $this->_category_has_extra[$category] = true;
                     }
                 }
             }
-            uksort($this->_grouped_psets, function ($a, $b) {
+            uksort($this->_psets_by_category, function ($a, $b) {
                 if ($a === "") {
                     return 1;
                 } else {
@@ -1851,27 +2276,85 @@ class Conf {
                 }
             });
         }
-        return $this->_grouped_psets;
+        return $this->_psets_by_category;
     }
 
-    function pset_group($group) {
-        return get($this->pset_groups(), $group, []);
+    /** @param string $category
+     * @return list<Pset> */
+    function pset_category($category) {
+        return ($this->psets_by_category())[$category] ?? [];
     }
 
-    function pset_group_has_extra($group) {
-        $this->pset_groups();
-        return get($this->_group_has_extra, $group, false);
+    /** @param string $category
+     * return bool */
+    function pset_category_has_extra($category) {
+        $this->psets_by_category();
+        return $this->_category_has_extra[$category] ?? false;
+    }
+
+
+    /** @return list<FormulaConfig> */
+    function global_formulas() {
+        if (!isset($this->_global_formulas)) {
+            $this->_global_formulas = [];
+            $n = 0;
+            foreach ($this->config->_formulas ?? [] as $name => $fc) {
+                $this->_global_formulas[] = $f = new FormulaConfig($this, $name, $fc, $n++);
+                if ($f->name) {
+                    $this->_formulas_by_name[$f->name] = $f;
+                }
+            }
+        }
+        return $this->_global_formulas;
+    }
+
+    /** @return ?FormulaConfig */
+    function formula_by_name($name) {
+        if (!isset($this->_global_formulas)) {
+            $this->global_formulas();
+        }
+        return $this->_formulas_by_name[$name] ?? null;
+    }
+
+    /** @return list<FormulaConfig> */
+    function formulas_by_home_position() {
+        $fs = [];
+        foreach ($this->global_formulas() as $f) {
+            if ($f->home_position !== null)
+                $fs[] = $f;
+        }
+        usort($fs, function ($a, $b) {
+            if ($a->home_position != $b->home_position) {
+                return $a->home_position < $b->home_position ? -1 : 1;
+            } else {
+                return $a->subposition - $b->subposition;
+            }
+        });
+        return $fs;
+    }
+
+    /** @return GradeFormula */
+    function canonical_formula(GradeFormula $gf) {
+        $n = $gf->canonical_id();
+        foreach ($this->_canon_formulas as $ff) {
+            if ($ff->canonical_id() === $n) {
+                return $ff;
+            }
+        }
+        $this->_canon_formulas[] = $gf;
+        return $gf;
     }
 
 
     function handout_repo(Pset $pset, Repository $inrepo = null) {
-        global $Now, $ConfSitePATH;
         $url = $pset->handout_repo_url;
-        if (!$url)
+        if (!$url) {
             return null;
-        if ($this->opt("noGitTransport") && substr($url, 0, 6) === "git://")
+        }
+        if ($this->opt("noGitTransport") && substr($url, 0, 6) === "git://") {
             $url = "ssh://git@" . substr($url, 6);
-        $hrepo = get($this->_handout_repos, $url);
+        }
+        $hrepo = $this->_handout_repos[$url] ?? null;
         if (!$hrepo && ($hrepo = Repository::find_or_create_url($url, $this))) {
             $hrepo->is_handout = true;
             $this->_handout_repos[$url] = $hrepo;
@@ -1884,12 +2367,12 @@ class Conf {
             if (!$hset) {
                 $save = $hset = (object) array();
             }
-            if (!($hme = get($hset, $hrepoid))) {
+            if (!($hme = $hset->$hrepoid ?? null)) {
                 $save = $hme = $hset->$hrepoid = (object) array();
             }
-            if ((int) get($hme, $cacheid) + 300 < $Now
+            if ((int) ($hme->$cacheid ?? 0) + 300 < Conf::$now
                 && !$this->opt("disableRemote")) {
-                $save = $hme->$cacheid = $Now;
+                $save = $hme->$cacheid = Conf::$now;
                 $hrepo->reposite->gitfetch($hrepo->repoid, $cacheid, false);
             }
             if ($save) {
@@ -1900,7 +2383,6 @@ class Conf {
     }
 
     private function populate_handout_commits(Pset $pset) {
-        global $Now;
         if (!($hrepo = $this->handout_repo($pset))) {
             $this->_handout_commits[$pset->id] = [];
             return;
@@ -1911,11 +2393,11 @@ class Conf {
         if (!$hset) {
             $hset = (object) [];
         }
-        if (get($hset, "snaphash") !== $hrepo->snaphash
-            || (int) get($hset, "snaphash_at") + 300 < $Now
-            || !get($hset, "commits")) {
+        if (($hset->snaphash ?? null) !== $hrepo->snaphash
+            || (int) ($hset->snaphash_at ?? 0) + 300 < Conf::$now
+            || !($hset->commits ?? null)) {
             $hset->snaphash = $hrepo->snaphash;
-            $hset->snaphash_at = $Now;
+            $hset->snaphash_at = Conf::$now;
             $hset->commits = [];
             foreach ($hrepo->commits($pset, $pset->handout_branch) as $c) {
                 $hset->commits[] = [$c->hash, $c->commitat, $c->subject];
@@ -1932,27 +2414,31 @@ class Conf {
         $this->_handout_latest_commit[$pset->id] = current($commits);
     }
 
-    function handout_commits(Pset $pset, $hash = null) {
-        global $Now;
+    /** @return array<string,CommitRecord> */
+    function handout_commits(Pset $pset) {
         if (!array_key_exists($pset->id, $this->_handout_commits)) {
             $this->populate_handout_commits($pset);
         }
-        $commits = $this->_handout_commits[$pset->id];
-        if (!$hash) {
-            return $commits;
-        } else if (strlen($hash) === 40 || strlen($hash) === 64) {
-            return get($commits, $hash);
+        return $this->_handout_commits[$pset->id];
+    }
+
+    /** @return ?CommitRecord */
+    function handout_commit(Pset $pset, $hash) {
+        $commits = $this->handout_commits($pset);
+        if (strlen($hash) === 40 || strlen($hash) === 64) {
+            return $commits[$hash] ?? null;
         } else {
             $matches = [];
-            foreach ($commits as $h => $c)
+            foreach ($commits as $h => $c) {
                 if (str_starts_with($h, $hash))
                     $matches[] = $c;
+            }
             return count($matches) === 1 ? $matches[0] : null;
         }
     }
 
+    /** @return ?array<string,CommitRecord> */
     function handout_commits_from(Pset $pset, $hash) {
-        global $Now;
         if (!array_key_exists($pset->id, $this->_handout_commits)) {
             $this->populate_handout_commits($pset);
         }
@@ -1969,79 +2455,100 @@ class Conf {
         return count($matches) === 1 ? $list : null;
     }
 
+    /** @return ?CommitRecord */
     function latest_handout_commit(Pset $pset) {
         if (!array_key_exists($pset->id, $this->_handout_latest_commit)) {
             $this->populate_handout_commits($pset);
         }
-        return get($this->_handout_latest_commit, $pset->id);
+        return $this->_handout_latest_commit[$pset->id] ?? null;
     }
 
 
     private function branch_map() {
         if ($this->_branch_map === null) {
-            $this->_branch_map = [];
+            $this->_branch_map = [0 => "master", 1 => "main"];
             $result = $this->qe("select branchid, branch from Branch");
-            while (($row = $result->fetch_row()))
+            while (($row = $result->fetch_row())) {
                 $this->_branch_map[+$row[0]] = $row[1];
+            }
             Dbl::free($result);
         }
         return $this->_branch_map;
     }
 
     function branch($branchid) {
-        return get($this->branch_map(), $branchid);
+        return ($this->branch_map())[$branchid ?? 0] ?? null;
     }
 
+    function clear_branch_map() {
+        $this->_branch_map = null;
+    }
+
+    /** @param ?string $branch
+     * @return ?int */
     function ensure_branch($branch) {
-        if ((string) $branch === "" || $branch === "master")
+        if ($branch === null || $branch === "" || $branch === "master") {
+            return 0;
+        } else if ($branch === "main") {
+            return 1;
+        } else if (!Repository::validate_branch($branch)) {
             return null;
-        $key = array_search($branch, $this->branch_map(), true);
-        if ($key === false) {
-            $this->qe("insert into Branch set branch=?", $branch);
-            if (!$this->dblink->insert_id) {
-                $this->_branch_map = null;
-                return $this->ensure_branch($branch);
+        } else {
+            $key = array_search($branch, $this->branch_map(), true);
+            if ($key === false) {
+                $this->qe("insert into Branch set branch=?", $branch);
+                if (!$this->dblink->insert_id) {
+                    $this->_branch_map = null;
+                    return $this->ensure_branch($branch);
+                }
+                $key = $this->dblink->insert_id;
+                $this->_branch_map[$key] = $branch;
             }
-            $key = $this->dblink->insert_id;
-            $this->_branch_map[$key] = $branch;
+            return $key;
         }
-        return $key;
     }
 
 
     // API
 
     private function call_api($uf, Contact $user, Qrequest $qreq, APIData $api) {
-        if (!$uf)
+        if (!$uf) {
             return ["ok" => false, "error" => "API function not found."];
-        if (!get($uf, "get") && !check_post($qreq))
+        } else if (!($uf->get ?? null) && !$qreq->valid_post()) {
             return ["ok" => false, "error" => "Missing credentials."];
-        $need_hash = !!get($uf, "hash");
-        $need_repo = !!get($uf, "repo");
-        $need_pset = $need_repo || $need_hash || !!get($uf, "pset");
-        $need_user = !!get($uf, "user");
-        if ($need_user && !$api->user)
-            return ["ok" => false, "error" => "Missing user."];
-        if ($need_pset && !$api->pset)
-            return ["ok" => false, "error" => "Missing pset."];
-        if ($need_repo && !$api->repo)
-            return ["ok" => false, "error" => "Missing repository."];
-        if ($need_hash) {
-            $api->commit = $this->check_api_hash($api->hash, $api);
-            if (!$api->commit)
-                return ["ok" => false, "error" => ($api->hash ? "Missing commit." : "Disconnected commit.")];
         }
-        if (($req = get($uf, "require")))
-            foreach (expand_includes($req) as $f)
+        $need_hash = !!($uf->hash ?? false);
+        $need_repo = !!($uf->repo ?? false);
+        $need_pset = $need_repo || $need_hash || !!($uf->pset ?? false);
+        $need_user = !!($uf->user ?? false);
+        if ($need_user && !$api->user) {
+            return ["ok" => false, "error" => "Missing user."];
+        } else if ($need_pset && !$api->pset) {
+            return ["ok" => false, "error" => "Missing pset."];
+        } else if ($need_repo && !$api->repo) {
+            return ["ok" => false, "error" => "Missing repository."];
+        } else if ($need_hash) {
+            $api->commit = $this->check_api_hash($api->hash, $api);
+            if (!$api->commit) {
+                return ["ok" => false, "error" => ($api->hash ? "Missing commit." : "Disconnected commit.")];
+            }
+        }
+        if (($req = $uf->require ?? [])) {
+            foreach (expand_includes($req) as $f) {
                 require_once $f;
+            }
+        }
         return call_user_func($uf->callback, $user, $qreq, $api, $uf);
     }
+    /** @return ?CommitRecord */
     function check_api_hash($input_hash, APIData $api) {
-        if (!$input_hash)
+        if (!$input_hash) {
             return null;
-        $commit = $api->pset->handout_commits($input_hash);
-        if (!$commit && $api->repo)
+        }
+        $commit = $api->pset->handout_commit($input_hash);
+        if (!$commit && $api->repo) {
             $commit = $api->repo->connected_commit($input_hash, $api->pset, $api->branch);
+        }
         return $commit;
     }
     function _add_api_json($fj) {
@@ -2049,54 +2556,67 @@ class Conf {
             && isset($fj->callback)) {
             $this->_api_map[$fj->fn] = $fj;
             return true;
-        } else
+        } else {
             return false;
+        }
     }
     private function fill_api_map() {
         $this->_api_map = [
-            "blob" => "15 API_Repo::blob",
-            "filediff" => "15 API_Repo::filediff",
-            "grade" => "3 API_Grade::grade",
-            "gradestatistics" => "3 API_GradeStatistics::run",
-            "jserror" => "1 API_JSError::jserror",
-            "latestcommit" => "3 API_Repo::latestcommit",
-            "linenote" => "15 API_Grade::linenote",
-            "multigrade" => "3 API_Grade::multigrade",
-            "repositories" => "17 API_Repo::user_repositories"
+            "blob" => "15 Repo_API::blob",
+            "diffconfig" => "15 Repo_API::diffconfig",
+            "filediff" => "15 Repo_API::filediff",
+            "flag" => "15 Flag_API::flag",
+            "grade" => "3 Grade_API::grade",
+            "gradestatistics" => "3 GradeStatistics_API::run",
+            "jserror" => "1 JSError_API::jserror",
+            "latestcommit" => "3 Repo_API::latestcommit",
+            "linenote" => "15 Grade_API::linenote",
+            "multigrade" => "3 Grade_API::multigrade",
+            "multiresolveflag" => "0 Flag_API::multiresolve",
+            "repositories" => "17 Repo_API::user_repositories"
         ];
-        if (($olist = $this->opt("apiFunctions")))
+        if (($olist = $this->opt("apiFunctions"))) {
             expand_json_includes_callback($olist, [$this, "_add_api_json"]);
+        }
     }
     function has_api($fn) {
-        if ($this->_api_map === null)
+        if ($this->_api_map === null) {
             $this->fill_api_map();
+        }
         return isset($this->_api_map[$fn]);
     }
     function api($fn) {
-        if ($this->_api_map === null)
+        if ($this->_api_map === null) {
             $this->fill_api_map();
-        $uf = get($this->_api_map, $fn);
+        }
+        $uf = $this->_api_map[$fn] ?? null;
         if ($uf && is_string($uf)) {
             $space = strpos($uf, " ");
             $flags = (int) substr($uf, 0, $space);
             $uf = $this->_api_map[$fn] = (object) ["callback" => substr($uf, $space + 1)];
-            if ($flags & 1)
+            if ($flags & 1) {
                 $uf->get = true;
-            if ($flags & 2)
+            }
+            if ($flags & 2) {
                 $uf->pset = true;
-            if ($flags & 4)
+            }
+            if ($flags & 4) {
                 $uf->repo = true;
-            if ($flags & 8)
+            }
+            if ($flags & 8) {
                 $uf->hash = true;
-            if ($flags & 16)
+            }
+            if ($flags & 16) {
                 $uf->user = true;
+            }
         }
         return $uf;
     }
     function call_api_exit($uf, Contact $user, Qrequest $qreq, APIData $info) {
-        if (is_string($uf))
+        if (is_string($uf)) {
             $uf = $this->api($uf);
-        if ($uf && get($uf, "redirect") && $qreq->redirect
+        }
+        if ($uf && ($uf->redirect ?? false) && $qreq->redirect
             && preg_match('@\A(?![a-z]+:|/).+@', $qreq->redirect)) {
             try {
                 JsonResultException::$capturing = true;
@@ -2107,11 +2627,11 @@ class Conf {
             if (is_object($j) && $j instanceof JsonResult) {
                 $j = $j->content;
             }
-            if (!get($j, "ok") && !get($j, "error")) {
+            if (!($j->ok ?? false) && !($j->error ?? false)) {
                 Conf::msg_error("Internal error.");
-            } else if (($x = get($j, "error"))) {
+            } else if (($x = $j->error ?? false)) {
                 Conf::msg_error(htmlspecialchars($x));
-            } else if (($x = get($j, "error_html"))) {
+            } else if (($x = $j->error_html ?? false)) {
                 Conf::msg_error($x);
             }
             Navigation::redirect_site($qreq->redirect);

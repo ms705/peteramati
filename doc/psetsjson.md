@@ -202,6 +202,10 @@ others are shown to users in different contexts.
 
     The time at which the problem set is due.
 
+* `obscure_late_hours`: boolean
+
+    If true, then do not highlight when a commit is past the deadline.
+
 Grades
 ------
 
@@ -226,7 +230,11 @@ this format.
 
 * `type`: string
 
+    null, `"number"`, `"text"`, `"checkbox"`, `"letter"`, `"select"`, or `"formula"`
+
 * `round`: string
+
+    null, `"none"`, `"up"`, `"down"`, or `"round"`
 
 * `max`: number
 
@@ -241,6 +249,10 @@ this format.
 
     If set explicitly to false, then students cannot see the value of `max`
     (graders can). Defaults to true.
+
+* `student`: boolean
+
+    If true, then students can edit this grade.
 
 * `is_extra`: boolean
 
@@ -297,7 +309,7 @@ object keyed by regular expression. For example:
 ```json
 "diffs": {
     "README\\.txt": {"full": true, "position": -1},
-    "\\.gitignore|check\\.pl": {"boring": true},
+    "\\.gitignore|check\\.pl": {"collapse": true},
     "out": {"ignore": true}
 }
 ```
@@ -307,8 +319,8 @@ This setting says:
 * Files named `README.txt` will be displayed in full (not as a diff), before
   other files (files by default have position 0).
 
-* Files named `.gitignore` and `check.pl` are “boring.” This means that any
-  diffs in these files will not be displayed by default.
+* Files named `.gitignore` and `check.pl` are collapsed. This means that diffs
+  in these files will not be displayed by default.
 
 * Files and directories named `out` are entirely ignored; they will not appear
   in diffs at all.
@@ -396,6 +408,11 @@ This depends on the suid-root `pa-jail` program in the `jail` subdirectory.
 
     Timeout after which the container will shut down. Defaults to 10 minutes.
     If set to ≤0, there is no timeout.
+
+* `idle_timeout`: interval (number or string like `10m` or `20s`)
+
+    Timeout after which the container will shut down if idle (no input or
+    output). Defaults to 3 minutes. If set to ≤0, there is no timeout.
 
 * `queue`: string
 
