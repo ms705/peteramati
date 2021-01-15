@@ -1385,7 +1385,7 @@ class PsetView {
       } else {
           // submitted on a later day
           // 1. count the rest of the deadline day
-          $to_midnight = (24 - $submitted["hours"]) * 3600 + (60 - $submitted["minutes"]) * 60 + (60 - $submitted["seconds"]);
+          $to_midnight = (23 - $dead["hours"]) * 3600 + (59 - $dead["minutes"]) * 60 + (59 - $dead["seconds"]);
           // remainder of time between deadline and submission, minus time on deadline day
           $remainder = $timestamp - $deadline - $to_midnight;
           assert($remainder >= 0);
