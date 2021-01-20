@@ -246,7 +246,7 @@ class GradeFormulaCompiler {
         } else if (preg_match('/\G(?:pi|π|m_pi)\b/si', $s, $m, 0, $p)) {
             $p += strlen($m[0]);
             $e = new Number_GradeFormula((float) M_PI);
-        } else if (preg_match('/\G(?:log10|log|ln|lg|exp)\b/s', $s, $m, 0, $p)) {
+        } else if (preg_match('/\G(?:log10|log|ln|lg|exp|ceil|floor)\b/s', $s, $m, 0, $p)) {
             list($e, $p) = $this->parse_prefix($p + strlen($m[0]), self::UNARY_PRECEDENCE);
             if ($e !== null) {
                 $e = new Unary_GradeFormula($m[0], $e);
